@@ -161,7 +161,8 @@ def test_task_record_does_not_contain_image_bytes(tmp_path):
     drv, _ = make(tmp_path)
     info = run(drv.submit_video(VideoRequest(prompt="x", image_path=str(p))))
     raw = (tmp_path / "tasks" / f"{info.task_id}.json").read_text(encoding="utf-8")
-    assert "base64" not in raw and str(p) in raw
+    # путь в JSON экранирован (на Windows \ → \\), поэтому сравниваем после разбора, а не подстрокой
+    assert "base64" not in raw and json.loads(raw)["request"]["image_path"] == str(p)
 
 
 def test_start_auth_error_is_readable_and_records_nothing(tmp_path):

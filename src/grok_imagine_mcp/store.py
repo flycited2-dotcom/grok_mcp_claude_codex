@@ -44,7 +44,7 @@ class TaskStore:
                 continue
             try:
                 out.append(json.loads(p.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):                    # ValueError: битый JSON и не-UTF-8 байты
                 continue
         out.sort(key=lambda t: t.get("created_at", ""), reverse=True)
         return out[:limit]

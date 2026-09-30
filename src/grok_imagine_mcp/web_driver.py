@@ -31,8 +31,10 @@ class _TaskReporter:
         self._task["phase"] = name
         self._store.save(self._task)
 
-    def submitted(self, post_id: str) -> None:
-        self._task.update(post_id=post_id, submitted=True, phase="generating")
+    def submitted(self, post_id: str | None) -> None:
+        self._task.update(submitted=True, phase="generating")
+        if post_id:                                            # у картинки страницы поста нет: возобновлять нечем
+            self._task["post_id"] = post_id
         self._store.save(self._task)
 
 
@@ -124,6 +126,8 @@ class WebDriver:
             part.unlink(missing_ok=True)                       # оборванная запись не оставляет полфайла
         task.update(status="done", output_path=str(dest), error=None)
         task.pop("phase", None)
+        if generated.note:
+            task["notes"] = [*task.get("notes", []), generated.note]
         self.store.save(task)
 
     def _fail(self, task: dict, message: str) -> None:
@@ -150,7 +154,7 @@ class WebDriver:
             return task
         age = (self._utcnow() - datetime.fromisoformat(task["created_at"])).total_seconds()
         if age > self.queue_timeout_s + ORPHAN_GRACE_S:
-            self._fail(task, "задача прервана до отправки в Grok (сервер был перезапущен); запустите её заново")
+            self._fail(task, "задача прервана: сервер был перезапущен до получения результата; запустите её заново")
         return task
 
     async def list_tasks(self, limit: int) -> list[TaskInfo]:

@@ -60,7 +60,8 @@ def page(script=None, **kw):
 
 def state(**over):
     base = {"href": "https://grok.com/imagine", "path": "/imagine", "textbox": True, "ready": True,
-            "progress": False, "dialog": None, "vids": [], "imgs": [], "text": "Что мы должны imagine?"}
+            "composer_empty": False, "progress": False, "dialog": None, "vids": [], "imgs": [],
+            "text": "Что мы должны imagine?"}
     return json.dumps({**base, **over})
 
 
@@ -187,10 +188,36 @@ def test_wait_result_returns_the_url_after_progress_is_gone():
     assert run(p.wait_result("video", POST)) == URL
 
 
-def test_wait_result_for_images_reads_the_image_list():
-    img = "https://assets.grok.com/users/u/generated/x/image.jpg"
-    p, _, _ = page({"/* STATE */": state(imgs=[img])})
-    assert run(p.wait_result("image", POST)) == img
+def test_wait_result_for_images_waits_for_the_grid_to_settle_and_returns_the_first_image():
+    a, b = "data:image/jpeg;base64,AAAA", "data:image/jpeg;base64,BBBB"
+    p, _, _ = page({"/* STATE */": [state(imgs=[a]), state(imgs=[a, b])],       # сетка догружается, потом замирает
+                    "/* FIRST_IMAGE */": "data:image/jpeg;base64,QQ=="})
+    assert run(p.wait_result("image", "")) == "data:image/jpeg;base64,QQ=="
+    assert p.last_image_count == 2
+
+
+def test_wait_result_for_images_does_not_return_while_progress_is_shown():
+    a = "data:image/jpeg;base64,AAAA"
+    p, _, _ = page({"/* STATE */": [state(imgs=[a], progress=True)] * 3 + [state(imgs=[a])],
+                    "/* FIRST_IMAGE */": "data:image/jpeg;base64,QQ=="})
+    assert run(p.wait_result("image", "")) == "data:image/jpeg;base64,QQ=="
+
+
+def test_submit_image_is_accepted_when_the_composer_clears_and_has_no_post_id():
+    p, _, _ = page({"/* SUBMIT_CLICK */": True,
+                    "/* STATE */": [state(composer_empty=False), state(composer_empty=True)]})
+    assert run(p.submit("image")) is None
+
+
+def test_submit_image_is_accepted_when_images_already_appeared():
+    p, _, _ = page({"/* SUBMIT_CLICK */": True, "/* STATE */": state(imgs=["data:image/jpeg;base64,AAAA"])})
+    assert run(p.submit("image")) is None
+
+
+def test_submit_image_not_accepted_when_nothing_changes():
+    p, _, _ = page({"/* SUBMIT_CLICK */": True, "/* STATE */": state(composer_empty=False)})
+    with pytest.raises(DriverError, match="не принял запрос"):
+        run(p.submit("image"))
 
 
 def test_wait_result_raises_on_a_blocking_dialog():
@@ -243,6 +270,26 @@ def test_download_detects_the_image_type():
     p, _, _ = page({"/* FETCH */": _fetched(PNG)})
     got = run(p.download("https://assets.grok.com/users/u/generated/x/image.png", "image"))
     assert got.ext == ".png"
+
+
+def test_download_decodes_an_inline_data_uri_image_without_fetching():
+    p, cdp, _ = page()                                           # пустой сценарий: fetch в странице не нужен
+    got = run(p.download("data:image/png;base64," + base64.b64encode(PNG).decode(), "image"))
+    assert got.data == PNG and got.ext == ".png" and cdp.evaluated == []
+
+
+def test_download_rejects_a_data_uri_that_is_not_an_image():
+    p, _, _ = page()
+    with pytest.raises(DriverError, match="повреждён"):
+        run(p.download("data:image/jpeg;base64," + base64.b64encode(b"<html>").decode(), "image"))
+    with pytest.raises(DriverError, match="повреждён"):
+        run(p.download("data:image/jpeg;base64,@@@@", "image"))
+
+
+def test_a_data_uri_is_never_accepted_as_a_video_source():
+    p, _, _ = page()
+    with pytest.raises(DriverError, match="неожиданного адреса"):
+        run(p.download("data:video/mp4;base64,AAAA", "video"))
 
 
 def test_asset_url_must_be_https_on_grok_com_and_nothing_is_fetched_otherwise():

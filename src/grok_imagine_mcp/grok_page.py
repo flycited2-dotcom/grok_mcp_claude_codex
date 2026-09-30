@@ -26,6 +26,7 @@ POST_ID_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 GROK_HOSTS = frozenset({"grok.com", "www.grok.com"})
 IDLE_LIMIT_S = 45.0
 LOAD_TIMEOUT_S = 45.0
+IMAGE_SETTLE_S = 6.0            # сетка картинок не менялась столько секунд: догрузилась
 
 L_MODE = {"video": ("Видео", "Video"), "image": ("Изображение", "Image")}
 L_RESOLUTION = ("Разрешение видео", "Video resolution")
@@ -44,11 +45,24 @@ _STATE = r"""/* STATE */ (() => {
     .filter(t => t && !/cookie|конфиденциальн|privacy/i.test(t));
   const post = __POST_ID__;
   const vids = [...document.querySelectorAll('video')].map(v => v.currentSrc || v.src).filter(s => s && (!post || s.includes(post)));
-  const imgs = [...document.querySelectorAll('img')].filter(i => i.naturalWidth >= 256).map(i => i.currentSrc || i.src).filter(s => s && (!post || s.includes(post)));
+  // картинки приходят прямо на /imagine как data:-адреса: отдаём только начало, целиком их читает FIRST_IMAGE
+  const imgs = [...document.querySelectorAll('img')].filter(i => i.getBoundingClientRect().width > 100 && i.naturalWidth >= 256)
+    .map(i => i.currentSrc || i.src).filter(s => s && (s.startsWith('data:image/') || (post && s.includes(post)))).map(s => s.slice(0, 100));
   const text = (root.innerText || '').replace(/\s+/g, ' ').trim();
-  return JSON.stringify({href: location.href, path: location.pathname, textbox: !!document.querySelector('[role=textbox]'),
+  const box = document.querySelector('[role=textbox]');
+  return JSON.stringify({href: location.href, path: location.pathname, textbox: !!box,
+    composer_empty: !!box && (box.innerText || '').trim() === '',
     ready: document.readyState === 'complete', progress: __PROGRESS_RE__.test(text), dialog: dialogs[0] || null,
     vids, imgs, text: text.slice(0, 200)});
+})()"""
+
+_FIRST_IMAGE = r"""/* FIRST_IMAGE */ (() => {
+  const post = __POST_ID__;
+  const i = [...document.querySelectorAll('img')].find(i => {
+    const s = i.currentSrc || i.src;
+    return i.getBoundingClientRect().width > 100 && i.naturalWidth >= 256 && s && (s.startsWith('data:image/') || (post && s.includes(post)));
+  });
+  return i ? (i.currentSrc || i.src) : null;
 })()"""
 
 _RECT = r"""/* RECT */ (() => {
@@ -140,6 +154,7 @@ class GrokPage:
     def __init__(self, cdp: CdpConnection, *, profile: str = "", sleep=asyncio.sleep, now=time.monotonic,
                  poll_s: float = 1.0):
         self.cdp, self.profile, self._sleep, self._now, self.poll_s = cdp, profile, sleep, now, poll_s
+        self.last_image_count = 0          # сколько картинок Grok выдал в последней генерации (для примечания)
 
     # ---------- низкий уровень ----------
 
@@ -300,7 +315,9 @@ class GrokPage:
         await self.cdp.send("Input.insertText", text=" ".join(text.split()))   # перенос строки мог бы отправить форму
         await self._wait_for(_SUBMIT_READY, 6.0, "кнопка отправки")
 
-    async def submit(self) -> str:
+    async def submit(self, kind: str = "video") -> str | None:
+        """Видео: возвращает post_id со страницы результата. Картинка: страницы поста нет, возвращает None,
+        когда Grok принял запрос (композер очистился или уже пошли картинки)."""
         if not await self.cdp.evaluate(_SUBMIT_CLICK):
             raise await self._missing("кнопка отправки")
         deadline = self._now() + 30.0
@@ -308,22 +325,33 @@ class GrokPage:
             st = await self._state()
             if st["dialog"]:
                 raise DriverError(f"Grok не принял запрос и показал окно: {st['dialog'][:200]}")
-            match = re.search(r"/imagine/post/([0-9a-f-]{36})", st["path"])
-            if match:
-                return match.group(1)
+            if kind == "video":
+                match = re.search(r"/imagine/post/([0-9a-f-]{36})", st["path"])
+                if match:
+                    return match.group(1)
+            elif st["composer_empty"] or st["progress"] or st["imgs"]:
+                return None
             if self._now() >= deadline:
-                raise DriverError("Grok не принял запрос за 30 с: страница не перешла к результату")
+                raise DriverError("Grok не принял запрос за 30 с: страница не отреагировала на отправку")
             await self._sleep(self.poll_s)
 
     async def wait_result(self, kind: str, post_id: str) -> str:
-        idle_since = None
+        """Видео: адрес файла. Картинка: Grok выдаёт сетку картинок прямо на странице; ждём, пока она
+        перестанет меняться, и отдаём первую (data:-адрес целиком)."""
+        idle_since, count, changed_at = None, 0, self._now()
         while True:
             st = await self._state(post_id)
             if st["dialog"]:
                 raise DriverError(f"Grok показал окно и не довёл генерацию до конца: {st['dialog'][:200]}")
             media = st["vids"] if kind == "video" else st["imgs"]
+            if len(media) != count:
+                count, changed_at = len(media), self._now()
             if media and not st["progress"]:
-                return media[0]
+                if kind == "video":
+                    return media[0]
+                if self._now() - changed_at >= IMAGE_SETTLE_S:
+                    self.last_image_count = count
+                    return await self.cdp.evaluate(_FIRST_IMAGE.replace("__POST_ID__", json.dumps(post_id)))
             if st["progress"] or media:
                 idle_since = None
             else:
@@ -335,6 +363,12 @@ class GrokPage:
             await self._sleep(self.poll_s * 3)
 
     async def download(self, url: str, kind: str) -> Generated:
+        if kind == "image" and url.startswith("data:image/"):     # картинка уже в странице: скачивать нечего
+            try:
+                data = base64.b64decode(url.partition(",")[2], validate=True)
+                return Generated(data, detect_image_ext(data))
+            except (ValueError, MediaError) as e:                 # binascii.Error — подкласс ValueError
+                raise DriverError(f"скачанный файл повреждён: {e}") from e
         check_asset_url(url)
         res = json.loads(await self.cdp.evaluate(_FETCH.replace("__URL__", json.dumps(url))))
         if "err" in res:

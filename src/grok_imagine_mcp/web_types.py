@@ -18,12 +18,14 @@ class BackendState:
 class Generated:
     data: bytes
     ext: str                        # ".mp4", ".png", ".jpg" или ".webp"
+    note: str = ""                  # попадает в «Примечания» задачи (например, «сохранена первая из 10»)
 
 
 class Reporter(Protocol):
     def phase(self, name: str) -> None: ...
 
-    def submitted(self, post_id: str) -> None: ...
+    def submitted(self, post_id: str | None) -> None:
+        """post_id есть у видео; у картинки страницы поста нет, тогда None."""
 
 
 class WebBackend(Protocol):

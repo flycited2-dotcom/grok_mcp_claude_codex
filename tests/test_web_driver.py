@@ -22,6 +22,7 @@ class FakeBackend:
         self.result = result or Generated(b"VIDEO", ".mp4")
         self.calls = []
         self.exc = None
+        self.post = POST                 # None: у картинки нет страницы поста
         self.gate = None                 # asyncio.Event: пока не выставлен, генерация «идёт»
 
     async def state(self):
@@ -29,7 +30,7 @@ class FakeBackend:
 
     async def generate(self, opts, reporter):
         self.calls.append(("generate", opts))
-        reporter.submitted(POST)
+        reporter.submitted(self.post)
         if self.gate is not None:
             await self.gate.wait()
         if self.exc:
@@ -101,6 +102,21 @@ def test_image_task_gets_the_extension_of_the_generated_file(tmp_path):
         return await drv.task_status(info.task_id, 30)
     done = run(main())
     assert done.kind == "image" and done.status == "done" and done.output_path.endswith(".png")
+
+
+def test_image_task_has_no_post_id_and_keeps_the_note_about_extra_images(tmp_path):
+    note = "Grok сгенерировал 10 картинок, сохранена первая"
+
+    async def main():
+        backend = FakeBackend(result=Generated(PNG, ".png", note=note))
+        backend.post = None
+        drv, _ = make(tmp_path, backend)
+        info = await drv.submit_image(ImageRequest(prompt="кот"))
+        return info, await drv.task_status(info.task_id, 30)
+    info, done = run(main())
+    saved = json.loads((tmp_path / "tasks" / f"{info.task_id}.json").read_text(encoding="utf-8"))
+    assert done.status == "done" and done.submitted is True and "post_id" not in saved
+    assert note in done.message
 
 
 def test_unsupported_value_is_refused_and_no_task_is_created(tmp_path):
@@ -199,7 +215,7 @@ def test_task_without_post_id_is_failed_only_after_the_queue_limit_plus_grace(tm
     fresh, b1 = run(main(1))
     assert fresh.status == "pending" and b1.calls == []
     stale, b2 = run(main(50))                               # 900 с очереди + 300 с запаса = 20 минут
-    assert stale.status == "failed" and "прервана до отправки" in stale.error and b2.calls == []
+    assert stale.status == "failed" and "задача прервана" in stale.error and b2.calls == []
 
 
 def test_resume_does_not_fail_the_task_when_the_lock_stays_busy(tmp_path):

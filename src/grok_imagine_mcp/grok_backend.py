@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,9 +27,9 @@ def pick_target(pages: list[dict]) -> str | None:
 
 class GrokBackend:
     def __init__(self, port: int, profile: Path, chrome_path: Path | None, *,
-                 fetch_json=http_json, ensure=ensure_chrome, connect=CdpConnection.connect):
+                 fetch_json=http_json, ensure=ensure_chrome, connect=CdpConnection.connect, make_page=GrokPage):
         self.port, self.profile, self.chrome_path = port, Path(profile), chrome_path
-        self._fetch_json, self._ensure, self._connect = fetch_json, ensure, connect
+        self._fetch_json, self._ensure, self._connect, self._make_page = fetch_json, ensure, connect, make_page
 
     async def state(self) -> BackendState:
         """Не запускает окно и не открывает страницы: только смотрит на уже открытые вкладки."""
@@ -57,7 +58,7 @@ class GrokBackend:
         cdp = await self._connect(ws_url)
         try:
             await cdp.send("Page.bringToFront")
-            yield GrokPage(cdp, profile=str(self.profile))
+            yield self._make_page(cdp, profile=str(self.profile))
         finally:
             await cdp.close()
 
@@ -70,11 +71,15 @@ class GrokBackend:
             else:
                 await page.prepare_image(opts)
             await page.enter_prompt(opts.prompt)
-            post_id = await page.submit()
+            post_id = await page.submit(kind)              # у картинки страницы поста нет: None
             reporter.submitted(post_id)
-            url = await page.wait_result(kind, post_id)
+            url = await page.wait_result(kind, post_id or "")
             reporter.phase("downloading")
-            return await page.download(url, kind)
+            generated = await page.download(url, kind)
+            if kind == "image" and page.last_image_count > 1:
+                generated = replace(generated, note=f"Grok сгенерировал {page.last_image_count} картинок, "
+                                                    "сохранена первая")
+            return generated
 
     async def resume(self, post_id: str, kind: str, reporter: Reporter) -> Generated:
         if not POST_ID_RE.match(post_id):

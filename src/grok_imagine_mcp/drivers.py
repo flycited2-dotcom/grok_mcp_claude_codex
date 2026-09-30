@@ -34,11 +34,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def describe(task: dict) -> str:
-    """Человекочитаемое состояние задачи для ответа модели."""
+_WEB_PHASES = {
+    "queued": "Задача в очереди к окну Chrome с Grok.",
+    "submitting": "Задача отправляется в Grok.",
+    "generating": "Grok генерирует результат.",
+    "downloading": "Результат готов, файл скачивается.",
+}
+
+
+def _describe(task: dict) -> str:
     st, kind = task["status"], "Видео" if task["kind"] == "video" else "Картинка"
     if st == "recorded_dry_run":
         return "Драйвер xai не подключён (dry-run): задача записана на диск, в xAI НЕ отправлена."
+    if st == "pending" and task.get("driver") == "web":
+        return (_WEB_PHASES.get(task.get("phase"), "Задача выполняется в Grok.")
+                + " Проверьте grok_task_status позже (можно с wait_s=45).")
     if st == "pending":
         return "Задача принята xAI и выполняется. Проверьте grok_task_status позже (можно с wait_s=45)."
     if st == "done" and task.get("output_path"):
@@ -51,6 +61,13 @@ def describe(task: dict) -> str:
     if st == "expired":
         return "Запрос истёк на стороне xAI. Запустите генерацию заново."
     return st
+
+
+def describe(task: dict) -> str:
+    """Человекочитаемое состояние задачи для ответа модели."""
+    text = _describe(task)
+    notes = task.get("notes")
+    return f"{text} Примечания: {'; '.join(notes)}." if notes else text
 
 
 def to_info(task: dict) -> TaskInfo:

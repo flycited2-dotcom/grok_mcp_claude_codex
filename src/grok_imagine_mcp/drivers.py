@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Mapping, Protocol
 
 from .models import DriverStatus, ImageRequest, TaskInfo, VideoRequest
@@ -149,7 +150,18 @@ class UnconfiguredDriver:
 
 
 _NO_KEY = ("XAI_API_KEY не задан. Создайте ключ на console.x.ai (API оплачивается отдельно от подписки SuperGrok) "
-           "и передайте его серверу переменной окружения XAI_API_KEY.")
+           "и передайте его серверу переменной окружения XAI_API_KEY. Без ключа, по подписке Grok, работает "
+           "драйвер web: добавьте GROK_DRIVER=web в ~/.grok_imagine_mcp/.env.")
+
+
+def _number(env: Mapping[str, str], name: str, default, cast=float):
+    raw = env.get(name)
+    if raw in (None, ""):
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        raise DriverNotAvailable(f"{name} должен быть числом, получено {raw!r}") from None
 
 
 def build_driver(name: str, state_dir, output_dir, env: Mapping[str, str]) -> Driver:
@@ -162,4 +174,14 @@ def build_driver(name: str, state_dir, output_dir, env: Mapping[str, str]) -> Dr
         from .xai_driver import XaiDriver, make_client
         key = env["XAI_API_KEY"]
         return XaiDriver(lambda: make_client(key), store, output_dir)
-    raise DriverNotAvailable(f"Неизвестный драйвер {name!r}. Доступны: xai, dry-run")
+    if name == "web":
+        from .chrome import find_chrome
+        from .grok_backend import GrokBackend
+        from .web_driver import WebDriver
+        port = _number(env, "GROK_WEB_PORT", 9340, int)
+        profile = Path(env.get("GROK_CHROME_PROFILE") or Path(state_dir) / "chrome-profile")
+        backend = GrokBackend(port, profile, find_chrome(env))
+        return WebDriver(backend, store, Path(output_dir), Path(state_dir) / "web.lock",
+                         queue_timeout_s=_number(env, "GROK_WEB_QUEUE_TIMEOUT_S", 900.0),
+                         generation_timeout_s=_number(env, "GROK_WEB_GENERATION_TIMEOUT_S", 900.0))
+    raise DriverNotAvailable(f"Неизвестный драйвер {name!r}. Доступны: xai, dry-run, web")

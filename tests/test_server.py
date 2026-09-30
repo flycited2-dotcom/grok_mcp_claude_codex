@@ -162,3 +162,14 @@ def test_stdio_without_api_key_starts_and_explains(tmp_path):
     status, gen = anyio.run(main)
     assert _payload(status)["ready"] is False
     assert gen.is_error is True and "XAI_API_KEY" in gen.content[0].text
+
+
+def test_stdio_web_driver_reports_status_without_launching_chrome(tmp_path):
+    """grok_status драйвера web только смотрит на порт: окно не запускает и страницы не открывает."""
+    async def main():
+        async with Client(_stdio(tmp_path, GROK_DRIVER="web", GROK_WEB_PORT="9")) as c:     # на порту 9 никого нет
+            return await c.call_tool("grok_status", {})
+
+    data = _payload(anyio.run(main))
+    assert data["driver"] == "web" and data["live"] is True and data["ready"] is True
+    assert "не запущено" in data["detail"]

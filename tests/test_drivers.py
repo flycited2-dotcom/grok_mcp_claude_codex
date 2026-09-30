@@ -94,5 +94,34 @@ def test_build_driver_xai_with_key(tmp_path):
 
 
 def test_build_driver_unknown_name(tmp_path):
-    with pytest.raises(DriverNotAvailable, match="uia"):
+    with pytest.raises(DriverNotAvailable, match="uia") as e:
         build_driver("uia", tmp_path, tmp_path / "out", env={})
+    assert "web" in str(e.value)
+
+
+def test_build_driver_web_defaults(tmp_path):
+    from grok_imagine_mcp.web_driver import WebDriver
+    drv = build_driver("web", tmp_path, tmp_path / "out", env={})
+    assert isinstance(drv, WebDriver) and drv.name == "web"
+    assert drv.lock_path == tmp_path / "web.lock"
+    assert drv.backend.port == 9340 and drv.backend.profile == tmp_path / "chrome-profile"
+    assert drv.queue_timeout_s == 900 and drv.generation_timeout_s == 900
+
+
+def test_build_driver_web_reads_settings(tmp_path):
+    drv = build_driver("web", tmp_path, tmp_path / "out", env={
+        "GROK_WEB_PORT": "9555", "GROK_CHROME_PROFILE": str(tmp_path / "mine"),
+        "GROK_WEB_GENERATION_TIMEOUT_S": "60", "GROK_WEB_QUEUE_TIMEOUT_S": "30"})
+    assert drv.backend.port == 9555 and drv.backend.profile == tmp_path / "mine"
+    assert drv.generation_timeout_s == 60 and drv.queue_timeout_s == 30
+
+
+@pytest.mark.parametrize("name", ["GROK_WEB_PORT", "GROK_WEB_GENERATION_TIMEOUT_S", "GROK_WEB_QUEUE_TIMEOUT_S"])
+def test_build_driver_web_rejects_a_non_number_with_the_setting_name(tmp_path, name):
+    with pytest.raises(DriverNotAvailable, match=name):
+        build_driver("web", tmp_path, tmp_path / "out", env={name: "много"})
+
+
+def test_missing_key_hint_mentions_the_web_driver(tmp_path):
+    drv = build_driver("xai", tmp_path, tmp_path / "out", env={})
+    assert "GROK_DRIVER=web" in drv.reason

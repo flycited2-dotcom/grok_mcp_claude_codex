@@ -1,6 +1,7 @@
 """Backend драйвера web: окно Chrome + CDP + страница Grok. Единственное место, где всё это собирается вместе."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -17,19 +18,29 @@ _LOGIN_PREFIX = "accounts."
 
 
 def pick_target(pages: list[dict]) -> str | None:
-    """Адрес WebSocket вкладки: сначала вкладка на grok.com, затем любая обычная вкладка."""
+    """Адрес WebSocket вкладки, которой можно управлять: вкладка на grok.com, затем вкладка входа, затем пустая.
+    Чужую вкладку пользователя не берём: её пришлось бы увести на grok.com."""
     tabs = [p for p in pages if p.get("type") == "page" and p.get("webSocketDebuggerUrl")]
-    for tab in tabs:
-        if (urlsplit(tab.get("url", "")).hostname or "") in GROK_HOSTS:
-            return tab["webSocketDebuggerUrl"]
-    return tabs[0]["webSocketDebuggerUrl"] if tabs else None
+
+    def host(tab: dict) -> str:
+        return urlsplit(tab.get("url", "")).hostname or ""
+
+    for accepts in (lambda t: host(t) in GROK_HOSTS,
+                    lambda t: host(t).startswith(_LOGIN_PREFIX),
+                    lambda t: t.get("url", "").startswith(("about:blank", "chrome://newtab"))):
+        for tab in tabs:
+            if accepts(tab):
+                return tab["webSocketDebuggerUrl"]
+    return None
 
 
 class GrokBackend:
     def __init__(self, port: int, profile: Path, chrome_path: Path | None, *,
-                 fetch_json=http_json, ensure=ensure_chrome, connect=CdpConnection.connect, make_page=GrokPage):
+                 fetch_json=http_json, ensure=ensure_chrome, connect=CdpConnection.connect, make_page=GrokPage,
+                 sleep=asyncio.sleep):
         self.port, self.profile, self.chrome_path = port, Path(profile), chrome_path
         self._fetch_json, self._ensure, self._connect, self._make_page = fetch_json, ensure, connect, make_page
+        self._sleep = sleep
 
     async def state(self) -> BackendState:
         """Не запускает окно и не открывает страницы: только смотрит на уже открытые вкладки."""
@@ -48,11 +59,15 @@ class GrokBackend:
     @asynccontextmanager
     async def _session(self):
         await self._ensure(self.port, self.profile, self.chrome_path)
-        pages = await self._fetch_json(self.port, "/json/list") or []
-        ws_url = pick_target(pages)
-        if ws_url is None:
-            created = await self._fetch_json(self.port, "/json/new?about:blank", method="PUT")
-            ws_url = (created or {}).get("webSocketDebuggerUrl")
+        ws_url, created_id = None, None
+        for _ in range(10):                       # сразу после запуска список вкладок бывает ещё пуст
+            ws_url = pick_target(await self._fetch_json(self.port, "/json/list") or [])
+            if ws_url:
+                break
+            await self._sleep(0.5)
+        if ws_url is None:                        # подходящей вкладки нет: открываем свою, чужие не трогаем
+            created = await self._fetch_json(self.port, "/json/new?about:blank", method="PUT") or {}
+            ws_url, created_id = created.get("webSocketDebuggerUrl"), created.get("id")
         if not ws_url:
             raise DriverError(f"в окне Chrome (порт {self.port}) нет вкладки, которой можно управлять")
         cdp = await self._connect(ws_url)
@@ -62,6 +77,8 @@ class GrokBackend:
             yield page
         finally:
             await cdp.close()
+            if created_id:                        # свою вкладку за собой закрываем
+                await self._fetch_json(self.port, f"/json/close/{created_id}")
 
     async def generate(self, opts: VideoOptions | ImageOptions, reporter: Reporter) -> Generated:
         kind = "video" if isinstance(opts, VideoOptions) else "image"

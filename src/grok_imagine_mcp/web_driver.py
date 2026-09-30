@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .cdp import CdpConnectionLost
 from .drivers import DriverError, load_task, now_iso, to_info
 from .models import DriverStatus, ImageRequest, TaskInfo, VideoRequest
 from .store import TaskStore
@@ -18,7 +19,12 @@ from .web_types import Generated, WebBackend
 log = logging.getLogger("grok_imagine_mcp")
 
 POLL_INTERVAL_S = 1.0
-ORPHAN_GRACE_S = 300.0          # к таймауту очереди: столько задача может идти от блокировки до отправки
+# Пока исполнитель жив (в любом процессе), он раз в HEARTBEAT_S пишет метку в запись задачи. Задача без метки дольше
+# HEARTBEAT_STALE_S никому не принадлежит: её можно дожать (есть post_id) или признать оборванной.
+HEARTBEAT_S = 15.0
+HEARTBEAT_STALE_S = 90.0
+MAX_RESUME_ATTEMPTS = 3         # сколько раз подряд можно потерять связь с окном и всё равно дожимать по post_id
+_NEVER = "1970-01-01T00:00:00+00:00"
 
 
 class _TaskReporter:
@@ -42,11 +48,13 @@ class WebDriver:
     name = "web"
 
     def __init__(self, backend: WebBackend, store: TaskStore, output_dir: Path, lock_path: Path, *,
-                 queue_timeout_s: float = 900.0, generation_timeout_s: float = 900.0,
+                 queue_timeout_s: float = 3600.0, generation_timeout_s: float = 900.0,
+                 heartbeat_s: float = HEARTBEAT_S, stale_after_s: float = HEARTBEAT_STALE_S,
                  sleep=asyncio.sleep, now: Callable[[], float] = time.monotonic,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
         self.backend, self.store, self.output_dir, self.lock_path = backend, store, Path(output_dir), Path(lock_path)
         self.queue_timeout_s, self.generation_timeout_s = queue_timeout_s, generation_timeout_s
+        self.heartbeat_s, self.stale_after_s = heartbeat_s, stale_after_s
         self._sleep, self._now, self._utcnow = sleep, now, utcnow
         self._workers: dict[str, asyncio.Task] = {}
 
@@ -62,7 +70,7 @@ class WebDriver:
 
     def _enqueue(self, kind: str, req, opts, notes: list[str]) -> TaskInfo:
         task = {"task_id": self.store.new_id(), "kind": kind, "driver": self.name, "status": "pending",
-                "phase": "queued", "submitted": False, "created_at": now_iso(),
+                "phase": "queued", "submitted": False, "created_at": now_iso(), "heartbeat_at": self._stamp(),
                 "request": req.model_dump(mode="json", exclude_none=True), "notes": notes}
         self.store.save(task)
         self._spawn(task["task_id"], opts)
@@ -80,18 +88,33 @@ class WebDriver:
 
     # ---------- исполнитель ----------
 
+    def _stamp(self) -> str:
+        return self._utcnow().isoformat(timespec="seconds")
+
+    async def _heartbeat(self, task: dict) -> None:
+        """Пока исполнитель жив, запись задачи «дышит»: по этой метке другие процессы понимают, что задача не брошена."""
+        while True:
+            if task.get("status") == "pending":
+                task["heartbeat_at"] = self._stamp()
+                self.store.save(task)
+            await asyncio.sleep(self.heartbeat_s)              # реальное время: не зависит от подставных часов очереди
+
     async def _work(self, task_id: str, opts) -> None:
         resume = opts is None
         lock = FileLock(self.lock_path)                        # своя блокировка на каждого исполнителя
+        beat = None
         try:
+            task = load_task(self.store, task_id)              # один словарь на всё: его обновляют и метка, и reporter
+            beat = asyncio.get_running_loop().create_task(self._heartbeat(task))
             if not await lock.acquire(self.queue_timeout_s, sleep=self._sleep, now=self._now):
                 if not resume:                                 # у возобновления исходный исполнитель может быть жив
-                    self._fail(load_task(self.store, task_id),
-                               f"очередь к окну Chrome не освободилась за {int(self.queue_timeout_s)} с; "
-                               "запустите задачу заново")
+                    self._fail(task, f"очередь к окну Chrome не освободилась за {int(self.queue_timeout_s)} с; "
+                                     "запустите задачу заново")
                 return
             try:
-                task = load_task(self.store, task_id)
+                fresh = load_task(self.store, task_id)
+                task.clear()
+                task.update(fresh)
                 if task["status"] != "pending":                # пока ждали очередь, задачу уже довели
                     return
                 try:
@@ -100,6 +123,8 @@ class WebDriver:
                     self._finish(task, generated)
                 except asyncio.TimeoutError:
                     self._fail(task, f"Grok не завершил генерацию за {int(self.generation_timeout_s)} с")
+                except CdpConnectionLost as e:
+                    self._lost_connection(task, e)
                 except DriverError as e:
                     self._fail(task, str(e))
                 except Exception as e:
@@ -108,6 +133,22 @@ class WebDriver:
                 lock.release()
         except Exception:                                      # сбой самого хранилища: исполнитель не должен молчать
             log.exception("web-драйвер: исполнитель задачи %s упал", task_id)
+        finally:
+            if beat is not None:
+                beat.cancel()
+                await asyncio.gather(beat, return_exceptions=True)
+
+    def _lost_connection(self, task: dict, error: Exception) -> None:
+        """Окно закрыли или Chrome упал. Если запрос уже ушёл (есть post_id), лимит потрачен: задача остаётся
+        pending с «протухшей» меткой, и ближайший grok_task_status дожмёт её по post_id (с новым окном)."""
+        attempts = task.get("resume_attempts", 0) + 1
+        if task.get("post_id") and attempts <= MAX_RESUME_ATTEMPTS:
+            task.update(resume_attempts=attempts, heartbeat_at=_NEVER, phase="generating")
+            self.store.save(task)
+            log.warning("web-драйвер: связь с окном потеряна, задача %s будет дожата (попытка %d)", task["task_id"],
+                        attempts)
+        else:
+            self._fail(task, f"связь с окном Chrome потеряна: {error}")
 
     async def _call_backend(self, task: dict, opts, reporter) -> Generated:
         if task.get("post_id"):
@@ -139,22 +180,25 @@ class WebDriver:
 
     async def task_status(self, task_id: str, wait_s: int) -> TaskInfo:
         task = load_task(self.store, task_id)
-        if task["status"] == "pending" and task_id not in self._workers:
-            task = self._adopt(task)
         deadline = self._now() + wait_s
-        while task["status"] == "pending" and self._now() < deadline:
+        while True:
+            if task["status"] == "pending" and task_id not in self._workers:
+                task = self._adopt(task)                       # исполнитель мог умереть и посреди ожидания
+            if task["status"] != "pending" or self._now() >= deadline:
+                return to_info(task)
             await self._sleep(POLL_INTERVAL_S)
             task = load_task(self.store, task_id)
-        return to_info(task)
 
     def _adopt(self, task: dict) -> dict:
-        """Задача «висит», а исполнителя в этом процессе нет: сервер перезапускали или она чужая."""
-        if task.get("post_id"):
-            self._spawn(task["task_id"], None)                 # дожимаем по post_id
+        """В этом процессе исполнителя нет. Если метка свежая, задачу ведёт другой процесс: не трогаем. Если
+        протухла, её никто не ведёт: дожимаем по post_id или признаём оборванной."""
+        beat = datetime.fromisoformat(task.get("heartbeat_at") or task["created_at"])
+        if (self._utcnow() - beat).total_seconds() <= self.stale_after_s:
             return task
-        age = (self._utcnow() - datetime.fromisoformat(task["created_at"])).total_seconds()
-        if age > self.queue_timeout_s + ORPHAN_GRACE_S:
-            self._fail(task, "задача прервана: сервер был перезапущен до получения результата; запустите её заново")
+        if task.get("post_id"):
+            self._spawn(task["task_id"], None)
+            return task
+        self._fail(task, "задача прервана: сервер был перезапущен до получения результата; запустите её заново")
         return task
 
     async def list_tasks(self, limit: int) -> list[TaskInfo]:

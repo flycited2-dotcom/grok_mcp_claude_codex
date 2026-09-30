@@ -9,7 +9,11 @@ import aiohttp
 
 
 class CdpError(Exception):
-    """Ошибка протокола CDP или потеря соединения с Chrome."""
+    """Ошибка протокола CDP или страницы."""
+
+
+class CdpConnectionLost(CdpError):
+    """Связь с Chrome потеряна (окно закрыли, Chrome упал или перезапускается): задачу с post_id можно дожать позже."""
 
 
 async def http_json(port: int, path: str, *, method: str = "GET", timeout: float = 2.0) -> Any | None:
@@ -42,7 +46,7 @@ class CdpConnection:
             ws = await session.ws_connect(ws_url, max_msg_size=0)       # base64 видео бывает десятки МБ
         except (aiohttp.ClientError, OSError) as e:
             await session.close()
-            raise CdpError(f"не удалось подключиться к Chrome: {e}") from e
+            raise CdpConnectionLost(f"не удалось подключиться к Chrome: {e}") from e
         return cls(session, ws)
 
     async def _read_loop(self) -> None:
@@ -67,13 +71,13 @@ class CdpConnection:
             self._closed = True
             for fut in self._pending.values():
                 if not fut.done():
-                    fut.set_exception(CdpError("соединение с Chrome закрыто"))
+                    fut.set_exception(CdpConnectionLost("соединение с Chrome закрыто"))
             self._pending.clear()
             self._arrived.set()
 
     async def send(self, method: str, **params) -> dict:
         if self._closed:
-            raise CdpError("соединение с Chrome закрыто")
+            raise CdpConnectionLost("соединение с Chrome закрыто")
         self._next_id += 1
         fut = asyncio.get_running_loop().create_future()
         self._pending[self._next_id] = fut

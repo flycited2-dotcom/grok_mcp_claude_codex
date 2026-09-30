@@ -181,7 +181,8 @@ def build_driver(name: str, state_dir, output_dir, env: Mapping[str, str]) -> Dr
         port = _number(env, "GROK_WEB_PORT", 9340, int)
         profile = Path(env.get("GROK_CHROME_PROFILE") or Path(state_dir) / "chrome-profile")
         backend = GrokBackend(port, profile, find_chrome(env))
-        return WebDriver(backend, store, Path(output_dir), Path(state_dir) / "web.lock",
-                         queue_timeout_s=_number(env, "GROK_WEB_QUEUE_TIMEOUT_S", 900.0),
+        # замок лежит в профиле: общий ресурс клиентов - окно этого профиля, а не папка состояния
+        return WebDriver(backend, store, Path(output_dir), profile / "grok-mcp.lock",
+                         queue_timeout_s=_number(env, "GROK_WEB_QUEUE_TIMEOUT_S", 3600.0),
                          generation_timeout_s=_number(env, "GROK_WEB_GENERATION_TIMEOUT_S", 900.0))
     raise DriverNotAvailable(f"Неизвестный драйвер {name!r}. Доступны: xai, dry-run, web")

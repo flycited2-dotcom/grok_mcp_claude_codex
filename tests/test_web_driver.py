@@ -1,10 +1,11 @@
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from grok_imagine_mcp.cdp import CdpConnectionLost
 from grok_imagine_mcp.drivers import DriverError, now_iso
 from grok_imagine_mcp.models import ImageRequest, VideoRequest
 from grok_imagine_mcp.store import TaskStore
@@ -14,6 +15,7 @@ from grok_imagine_mcp.web_types import BackendState, Generated
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 POST = "11111111-2222-3333-4444-555555555555"
+STALE = "1970-01-01T00:00:00+00:00"      # сердцебиения давно нет: исполнителя у задачи нет
 
 
 class FakeBackend:
@@ -24,13 +26,20 @@ class FakeBackend:
         self.exc = None
         self.post = POST                 # None: у картинки нет страницы поста
         self.gate = None                 # asyncio.Event: пока не выставлен, генерация «идёт»
+        self.lose_generate = None        # "before" / "after": оборвать связь с окном до / после отправки (один раз)
+        self.lose_resume_times = 0       # сколько раз подряд оборвать связь при возобновлении
 
     async def state(self):
         return self._state
 
     async def generate(self, opts, reporter):
         self.calls.append(("generate", opts))
+        if self.lose_generate == "before":
+            raise CdpConnectionLost("соединение с Chrome закрыто")
         reporter.submitted(self.post)
+        if self.lose_generate == "after":
+            self.lose_generate = None
+            raise CdpConnectionLost("соединение с Chrome закрыто")
         if self.gate is not None:
             await self.gate.wait()
         if self.exc:
@@ -40,6 +49,9 @@ class FakeBackend:
 
     async def resume(self, post_id, kind, reporter):
         self.calls.append(("resume", post_id, kind))
+        if self.lose_resume_times:
+            self.lose_resume_times -= 1
+            raise CdpConnectionLost("соединение с Chrome закрыто")
         if self.gate is not None:
             await self.gate.wait()
         if self.exc:
@@ -73,7 +85,8 @@ def run(coro):
 
 def pending_task(store, **extra):
     task = {"task_id": store.new_id(), "kind": "video", "driver": "web", "submitted": True, "status": "pending",
-            "phase": "generating", "created_at": now_iso(), "request": {"prompt": "x"}, "notes": [], **extra}
+            "phase": "generating", "created_at": now_iso(), "heartbeat_at": STALE, "request": {"prompt": "x"},
+            "notes": [], **extra}
     store.save(task)
     return task
 
@@ -204,18 +217,90 @@ def test_pending_task_with_post_id_is_resumed_after_a_restart(tmp_path):
     assert backend.calls == [("resume", POST, "video")]
 
 
-def test_task_without_post_id_is_failed_only_after_the_queue_limit_plus_grace(tmp_path):
-    created = "2026-10-01T10:00:00+00:00"
+def test_orphan_without_post_id_is_failed_as_soon_as_its_heartbeat_is_stale(tmp_path):
+    now = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
 
-    async def main(minutes_later):
-        now = datetime(2026, 10, 1, 10, minutes_later, tzinfo=timezone.utc)
+    async def main(seconds_old):
         drv, backend = make(tmp_path, utcnow=lambda: now)
-        task = pending_task(drv.store, submitted=False, phase="queued", created_at=created)
+        beat = (now - timedelta(seconds=seconds_old)).isoformat(timespec="seconds")
+        task = pending_task(drv.store, submitted=False, phase="queued", heartbeat_at=beat)
         return await drv.task_status(task["task_id"], 0), backend
-    fresh, b1 = run(main(1))
+    fresh, b1 = run(main(30))                               # исполнитель жив (этот или другой процесс)
     assert fresh.status == "pending" and b1.calls == []
-    stale, b2 = run(main(50))                               # 900 с очереди + 300 с запаса = 20 минут
+    stale, b2 = run(main(100))                              # сердцебиения нет больше 90 с: задачу никто не ведёт
     assert stale.status == "failed" and "задача прервана" in stale.error and b2.calls == []
+
+
+def test_a_fresh_heartbeat_means_another_process_is_on_it_so_nobody_resumes_it(tmp_path):
+    now = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+
+    async def main():
+        drv, backend = make(tmp_path, utcnow=lambda: now)
+        task = pending_task(drv.store, post_id=POST, heartbeat_at=now.isoformat(timespec="seconds"))
+        return await drv.task_status(task["task_id"], 0), backend
+    info, backend = run(main())
+    assert info.status == "pending" and backend.calls == []
+
+
+def test_worker_keeps_a_heartbeat_while_the_task_waits_for_the_lock(tmp_path):
+    async def main():
+        ticks = iter(range(100_000))
+        base = datetime(2026, 10, 1, 10, 0, tzinfo=timezone.utc)
+        drv, _ = make(tmp_path, queue_timeout_s=1e9, heartbeat_s=0.02,
+                      utcnow=lambda: base + timedelta(seconds=next(ticks)))
+        holder = FileLock(tmp_path / "web.lock")
+        assert holder.try_acquire()
+        try:
+            info = await drv.submit_video(VideoRequest(prompt="x"))
+            path = tmp_path / "tasks" / f"{info.task_id}.json"
+            await asyncio.sleep(0.15)
+            first = json.loads(path.read_text(encoding="utf-8"))["heartbeat_at"]
+            await asyncio.sleep(0.15)
+            second = json.loads(path.read_text(encoding="utf-8"))["heartbeat_at"]
+        finally:
+            holder.release()
+        return first, second
+    first, second = run(main())
+    assert second > first                                   # ISO-строки одного формата сравниваются как время
+
+
+def test_lost_connection_after_submit_keeps_the_task_pending_and_it_is_resumed(tmp_path):
+    async def main():
+        backend = FakeBackend()
+        backend.lose_generate = "after"                     # окно закрыли, когда post_id уже записан
+        drv, _ = make(tmp_path, backend)
+        info = await drv.submit_video(VideoRequest(prompt="x"))
+        return info, await drv.task_status(info.task_id, 60), backend
+    info, done, backend = run(main())
+    assert done.status == "done" and Path(done.output_path).read_bytes() == b"VIDEO"
+    assert [c[0] for c in backend.calls] == ["generate", "resume"]
+    saved = json.loads((tmp_path / "tasks" / f"{info.task_id}.json").read_text(encoding="utf-8"))
+    assert saved["resume_attempts"] == 1
+
+
+def test_lost_connection_before_the_request_was_sent_fails_the_task(tmp_path):
+    async def main():
+        backend = FakeBackend()
+        backend.lose_generate = "before"
+        drv, _ = make(tmp_path, backend)
+        info = await drv.submit_video(VideoRequest(prompt="x"))
+        return await drv.task_status(info.task_id, 30), backend
+    done, backend = run(main())
+    assert done.status == "failed" and "связь с окном Chrome потеряна" in done.error
+    assert [c[0] for c in backend.calls] == ["generate"]    # отправки не было: повторять нельзя, чтобы не потратить лимит дважды
+
+
+def test_resume_attempts_are_capped_so_a_crashing_window_cannot_loop_forever(tmp_path):
+    async def main():
+        backend = FakeBackend()
+        backend.lose_generate = "after"
+        backend.lose_resume_times = 99
+        drv, _ = make(tmp_path, backend)
+        info = await drv.submit_video(VideoRequest(prompt="x"))
+        return await drv.task_status(info.task_id, 120), backend
+    done, backend = run(main())
+    assert done.status == "failed" and "связь с окном Chrome потеряна" in done.error
+    assert [c[0] for c in backend.calls].count("resume") == 3
 
 
 def test_resume_does_not_fail_the_task_when_the_lock_stays_busy(tmp_path):

@@ -164,10 +164,21 @@ def test_disabled_menu_value_is_reported_as_unavailable():
 
 def test_menu_value_is_chosen_with_real_mouse_events():
     p, cdp, _ = page({"/* RECT */": json.dumps({"x": 5, "y": 6}),
-                      "/* MENU_ITEMS */": json.dumps([_item("6s"), _item("10s")]), "/* MENU_OPEN */": False})
+                      "/* MENU_ITEMS */": json.dumps([_item("6s"), _item("10s")]), "/* MENU_OPEN */": False,
+                      "/* TRIGGER_TEXT */": "10s"})
     run(p.choose_menu_option(L_DURATION, "10s"))
     presses = [params for m, params in cdp.sent if m == "Input.dispatchMouseEvent" and params["type"] == "mousePressed"]
     assert [(q["x"], q["y"]) for q in presses] == [(5, 6), (10.0, 20.0)]
+
+
+def test_menu_choice_that_did_not_stick_is_an_error_not_a_silent_default():
+    """Клик мог не попасть (перекрытие, сдвиг вёрстки): без перечитывания вышло бы видео 6 с вместо 10 с."""
+    p, _, _ = page({"/* RECT */": json.dumps({"x": 5, "y": 6}),
+                    "/* MENU_ITEMS */": json.dumps([_item("6s"), _item("10s")]), "/* MENU_OPEN */": False,
+                    "/* TRIGGER_TEXT */": "6s"})
+    with pytest.raises(DriverError) as e:
+        run(p.choose_menu_option(L_DURATION, "10s"))
+    assert "не применил значение 10s" in str(e.value) and "6s" in str(e.value)
 
 
 def test_prompt_newlines_are_collapsed_so_the_prompt_is_not_sent_early():
@@ -192,9 +203,15 @@ def test_audio_toggle_is_clicked_only_when_the_state_differs():
     p, cdp, _ = page({"/* AUDIO_STATE */": "true", "/* RECT */": json.dumps({"x": 1, "y": 2})})
     run(p.set_audio(True))
     assert not [1 for m, _ in cdp.sent if m == "Input.dispatchMouseEvent"]
-    p, cdp, _ = page({"/* AUDIO_STATE */": "true", "/* RECT */": json.dumps({"x": 1, "y": 2})})
+    p, cdp, _ = page({"/* AUDIO_STATE */": ["true", "false"], "/* RECT */": json.dumps({"x": 1, "y": 2})})
     run(p.set_audio(False))
     assert [1 for m, _ in cdp.sent if m == "Input.dispatchMouseEvent"]
+
+
+def test_audio_toggle_that_did_not_flip_is_an_error():
+    p, _, _ = page({"/* AUDIO_STATE */": "true", "/* RECT */": json.dumps({"x": 1, "y": 2})})
+    with pytest.raises(DriverError, match="не удалось переключить"):
+        run(p.set_audio(False))
 
 
 def test_attach_image_uses_the_intercepted_file_chooser(tmp_path):

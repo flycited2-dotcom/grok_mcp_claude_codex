@@ -19,8 +19,8 @@ log = logging.getLogger("grok_imagine_mcp")
 
 _INSTRUCTIONS = (
     "Инструменты ставят задачи генерации видео и картинок в Grok Imagine (xAI). "
-    "Видео готовится асинхронно: grok_generate_video возвращает task_id, готовый файл забирай через "
-    "grok_task_status (wait_s — сколько секунд подождать внутри вызова). "
+    "Видео (а у драйвера web и картинки) готовится асинхронно: grok_generate_video возвращает task_id, готовый "
+    "файл забирай через grok_task_status (wait_s — сколько секунд подождать внутри вызова). "
     "Сообщай пользователю о результате только по полям status и output_path; "
     "submitted=False значит, что в xAI ничего не отправлено."
 )
@@ -66,7 +66,8 @@ def build_server(driver: Driver) -> MCPServer:
         resolution: Annotated[ImageResolution | None, Field(description="1k (~1 Мп) или 2k (~4 Мп)")] = None,
         model: Annotated[ImageModel, Field(description="Модель картинок")] = "grok-imagine-image",
     ) -> TaskInfo:
-        """Сгенерировать картинку. Файл сохраняется на диск сразу, путь в output_path."""
+        """Поставить задачу генерации картинки. Драйвер xai сохраняет файл сразу (путь в output_path); драйвер web
+        работает в фоне: смотри status и забирай результат через grok_task_status."""
         try:
             req = ImageRequest(prompt=prompt, aspect_ratio=aspect_ratio, resolution=resolution, model=model)
         except ValidationError as e:

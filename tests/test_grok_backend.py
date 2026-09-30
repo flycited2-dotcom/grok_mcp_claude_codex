@@ -124,12 +124,64 @@ def test_grok_tab_wins_over_login_tab(tmp_path):
     assert asyncio.run(backend({"Browser": "c"}, pages, tmp_path).state()).logged_in is True
 
 
-def test_pick_target_prefers_grok_then_any_page_then_none():
-    grok, other = page("https://grok.com/imagine", "ws://grok"), page("https://example.com", "ws://other")
-    assert pick_target([other, grok]) == "ws://grok"
-    assert pick_target([other, page("chrome://x", "ws://ui", kind="browser_ui")]) == "ws://other"
-    assert pick_target([page("chrome://x", "ws://ui", kind="service_worker")]) is None
+def test_pick_target_prefers_grok_then_login_then_blank_and_never_a_foreign_tab():
+    grok, login = page("https://grok.com/imagine", "ws://grok"), page("https://accounts.x.ai/sign-in", "ws://login")
+    blank, foreign = page("about:blank", "ws://blank"), page("https://example.com", "ws://foreign")
+    assert pick_target([foreign, login, grok]) == "ws://grok"
+    assert pick_target([foreign, blank, login]) == "ws://login"
+    assert pick_target([foreign, blank]) == "ws://blank"
+    assert pick_target([foreign]) is None                       # чужую вкладку пользователя не уводим на grok.com
+    assert pick_target([page("chrome://x", "ws://ui", kind="browser_ui")]) is None
     assert pick_target([]) is None
+
+
+def session_backend(tmp_path, lists, created=None):
+    conn, fetched = FakeConn(), []
+    conn.ws = None
+
+    async def ensure(*a, **k):
+        pass
+
+    async def connect(ws_url):
+        conn.ws = ws_url
+        return conn
+
+    async def fetch_json(port, path, **kw):
+        fetched.append((path, kw.get("method", "GET")))
+        if path == "/json/list":
+            return lists.pop(0) if len(lists) > 1 else lists[0]
+        if path.startswith("/json/new"):
+            return created
+        return None
+
+    async def sleep(s):
+        pass
+
+    page_obj = FakePage()
+    b = GrokBackend(9340, tmp_path / "prof", None, fetch_json=fetch_json, ensure=ensure, connect=connect,
+                    make_page=lambda cdp, **kw: page_obj, sleep=sleep)
+    return b, conn, fetched
+
+
+def test_session_waits_for_the_tab_list_after_a_cold_start(tmp_path):
+    grok = page("https://grok.com/imagine", "ws://grok")
+    b, conn, fetched = session_backend(tmp_path, [[], [], [grok]])
+    asyncio.run(b.resume(POST, "video", Rec()))
+    assert conn.ws == "ws://grok" and not [p for p, _ in fetched if p.startswith("/json/new")]
+
+
+def test_session_opens_its_own_tab_when_only_foreign_tabs_exist_and_closes_it_afterwards(tmp_path):
+    foreign = page("https://example.com", "ws://foreign")
+    b, conn, fetched = session_backend(tmp_path, [[foreign]], created={"id": "T1", "webSocketDebuggerUrl": "ws://new"})
+    asyncio.run(b.resume(POST, "video", Rec()))
+    assert conn.ws == "ws://new"                                        # чужая вкладка не тронута
+    assert ("/json/new?about:blank", "PUT") in fetched and ("/json/close/T1", "GET") in fetched
+
+
+def test_session_fails_clearly_when_no_tab_can_be_used_or_created(tmp_path):
+    b, _, _ = session_backend(tmp_path, [[]], created=None)
+    with pytest.raises(DriverError, match="нет вкладки"):
+        asyncio.run(b.resume(POST, "video", Rec()))
 
 
 def test_resume_refuses_a_malformed_post_id_before_touching_chrome(tmp_path):

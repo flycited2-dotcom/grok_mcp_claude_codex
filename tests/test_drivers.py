@@ -103,9 +103,10 @@ def test_build_driver_web_defaults(tmp_path):
     from grok_imagine_mcp.web_driver import WebDriver
     drv = build_driver("web", tmp_path, tmp_path / "out", env={})
     assert isinstance(drv, WebDriver) and drv.name == "web"
-    assert drv.lock_path == tmp_path / "web.lock"
+    # замок лежит в профиле: общий ресурс клиентов — окно этого профиля, а не папка состояния
+    assert drv.lock_path == tmp_path / "chrome-profile" / "grok-mcp.lock"
     assert drv.backend.port == 9340 and drv.backend.profile == tmp_path / "chrome-profile"
-    assert drv.queue_timeout_s == 900 and drv.generation_timeout_s == 900
+    assert drv.queue_timeout_s == 3600 and drv.generation_timeout_s == 900
 
 
 def test_build_driver_web_reads_settings(tmp_path):
@@ -113,6 +114,7 @@ def test_build_driver_web_reads_settings(tmp_path):
         "GROK_WEB_PORT": "9555", "GROK_CHROME_PROFILE": str(tmp_path / "mine"),
         "GROK_WEB_GENERATION_TIMEOUT_S": "60", "GROK_WEB_QUEUE_TIMEOUT_S": "30"})
     assert drv.backend.port == 9555 and drv.backend.profile == tmp_path / "mine"
+    assert drv.lock_path == tmp_path / "mine" / "grok-mcp.lock"
     assert drv.generation_timeout_s == 60 and drv.queue_timeout_s == 30
 
 

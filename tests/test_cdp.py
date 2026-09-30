@@ -4,7 +4,7 @@ import json
 import pytest
 from aiohttp import web
 
-from grok_imagine_mcp.cdp import CdpConnection, CdpError, http_json
+from grok_imagine_mcp.cdp import CdpConnection, CdpConnectionLost, CdpError, http_json
 
 
 async def _ws_handler(request):
@@ -97,11 +97,22 @@ def test_evaluate_returns_value_and_raises_page_exceptions():
     assert _run(body) == 2
 
 
-def test_closed_connection_fails_pending_command():
+def test_closed_connection_fails_pending_command_with_a_distinct_error():
     async def body(conn):
-        with pytest.raises(CdpError, match="закрыто"):
+        with pytest.raises(CdpConnectionLost, match="закрыто"):
             await conn.send("Hang")
+        with pytest.raises(CdpConnectionLost):                   # и следующая команда тоже
+            await conn.send("Echo")
     _run(body)
+
+
+def test_protocol_errors_are_not_connection_loss():
+    assert not issubclass(CdpError, CdpConnectionLost) and issubclass(CdpConnectionLost, CdpError)
+
+
+def test_connecting_to_a_dead_port_is_connection_loss():
+    with pytest.raises(CdpConnectionLost):
+        asyncio.run(CdpConnection.connect("ws://127.0.0.1:1/devtools/page/x"))
 
 
 def test_http_json_reads_the_endpoint_and_returns_none_when_port_is_closed():

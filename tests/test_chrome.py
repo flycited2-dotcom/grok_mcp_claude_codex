@@ -2,8 +2,11 @@ import asyncio
 
 import pytest
 
-from grok_imagine_mcp.chrome import build_command, ensure_chrome, find_chrome
+from grok_imagine_mcp.chrome import build_command, ensure_chrome, find_chrome, profile_owns_port
 from grok_imagine_mcp.drivers import DriverError
+
+OURS = lambda profile, port: True       # noqa: E731  окно на порту принадлежит профилю
+FOREIGN = lambda profile, port: False   # noqa: E731  на порту отвечает чужой браузер
 
 
 def _exe(root, *parts):
@@ -69,8 +72,75 @@ def test_existing_window_is_reused_and_nothing_is_spawned(tmp_path):
     async def probe(port):
         return {"Browser": "Chrome/154"}
 
-    reused = asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, spawn=spawned.append))
+    reused = asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, spawn=spawned.append,
+                                       owns=OURS))
     assert reused is True and spawned == []
+
+
+def test_ownership_is_verified_once_not_on_every_generation(tmp_path):
+    """Проверка владельца порта стоит секунд (запуск PowerShell): подтверждённое окно не перепроверяем 10 минут."""
+    asked, clock = [], Clock()
+
+    async def probe(port):
+        return {"Browser": "Chrome/154"}
+
+    def owns(profile, port):
+        asked.append(port)
+        return True
+
+    for _ in range(3):
+        assert asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, now=clock.now,
+                                         owns=owns)) is True
+    assert asked == [9340]
+    clock.t += 601                                                      # срок вышел: проверяем снова
+    asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, now=clock.now, owns=owns))
+    assert asked == [9340, 9340]
+
+
+def test_a_failed_ownership_check_is_never_cached(tmp_path):
+    asked = []
+
+    async def probe(port):
+        return {"Browser": "Edge/154"}
+
+    def owns(profile, port):
+        asked.append(port)
+        return False
+
+    for _ in range(2):
+        with pytest.raises(DriverError):
+            asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, owns=owns))
+    assert len(asked) == 2
+
+
+def test_a_foreign_browser_on_the_port_is_refused_and_no_second_chrome_is_started(tmp_path):
+    spawned = []
+
+    async def probe(port):
+        return {"Browser": "Edge/154"}
+
+    with pytest.raises(DriverError, match="не относится к профилю"):
+        asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, spawn=spawned.append,
+                                  owns=FOREIGN))
+    assert spawned == []
+
+
+def test_profile_owns_the_port_only_when_the_listener_runs_with_that_user_data_dir(tmp_path):
+    """Chrome 154 при фиксированном порте не пишет DevToolsActivePort (проверено живьём): опознаём по командной
+    строке процесса, слушающего порт."""
+    prof = tmp_path / "chrome-profile"
+    own = f'"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9340 --user-data-dir="{prof}" --app=https://grok.com/imagine'
+    other = '"chrome.exe" --remote-debugging-port=9340 --user-data-dir="D:\\other\\profile"'
+    no_dir = '"chrome.exe" --remote-debugging-port=9340'
+    unquoted = f"chrome.exe --remote-debugging-port=9340 --user-data-dir={prof}"
+
+    def owns(cmd):
+        return profile_owns_port(prof, 9340, command_line=lambda port: cmd)
+
+    assert owns(own) is True and owns(unquoted) is True
+    assert owns(other) is False                                         # чужой профиль на нашем порту
+    assert owns(no_dir) is False                                        # профиль по умолчанию: точно не наш
+    assert owns(None) is True                                           # узнать не удалось (не Windows): не мешаем
 
 
 def test_missing_window_is_launched_and_waited_for(tmp_path):
@@ -82,7 +152,7 @@ def test_missing_window_is_launched_and_waited_for(tmp_path):
 
     chrome = _exe(tmp_path, "chrome.exe")
     reused = asyncio.run(ensure_chrome(9340, tmp_path / "prof", chrome, probe=probe, spawn=spawned.append,
-                                       sleep=clock.sleep, now=clock.now))
+                                       sleep=clock.sleep, now=clock.now, owns=OURS))
     assert reused is False
     assert len(spawned) == 1 and "--remote-debugging-port=9340" in spawned[0]
     assert (tmp_path / "prof").is_dir()
@@ -104,4 +174,16 @@ def test_port_that_never_answers_points_to_port_setting(tmp_path):
 
     with pytest.raises(DriverError, match="GROK_WEB_PORT"):
         asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe, spawn=lambda c: None,
-                                  sleep=clock.sleep, now=clock.now, timeout_s=5))
+                                  sleep=clock.sleep, now=clock.now, timeout_s=5, owns=OURS))
+
+
+def test_port_taken_by_a_foreign_browser_after_launch_is_reported_as_foreign_not_as_ours(tmp_path):
+    clock, state = Clock(), {"spawned": False}
+
+    async def probe(port):                 # наш Chrome не смог занять порт: после запуска отвечает чужой
+        return {"Browser": "Edge/154"} if state["spawned"] else None
+
+    with pytest.raises(DriverError, match="не относится к профилю"):
+        asyncio.run(ensure_chrome(9340, tmp_path / "p", tmp_path / "chrome.exe", probe=probe,
+                                  spawn=lambda c: state.update(spawned=True), sleep=clock.sleep, now=clock.now,
+                                  timeout_s=5, owns=FOREIGN))

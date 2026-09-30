@@ -33,6 +33,14 @@ def _tasks_dir(tmp_path):
     return tmp_path / "tasks"
 
 
+def test_image_tool_description_does_not_promise_an_immediate_file(tmp_path):
+    """У драйвера web картинка асинхронна: модель не должна докладывать о файле, которого ещё нет."""
+    async def fn(c):
+        return {t.name: t for t in (await c.list_tools()).tools}
+    desc = _with_client(tmp_path, fn)["grok_generate_image"].description
+    assert "grok_task_status" in desc and "сохраняется на диск сразу" not in desc
+
+
 def test_lists_five_tools_with_enums_in_schema(tmp_path):
     async def fn(c):
         return {t.name: t for t in (await c.list_tools()).tools}

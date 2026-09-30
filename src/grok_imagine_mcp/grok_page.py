@@ -103,6 +103,12 @@ _MENU_ITEMS = r"""/* MENU_ITEMS */ (() => {
 
 _MENU_OPEN = r"""/* MENU_OPEN */ [...document.querySelectorAll('[role=menu]')].some(m => m.getBoundingClientRect().width > 0)"""
 
+_TRIGGER_TEXT = r"""/* TRIGGER_TEXT */ (() => {
+  const L = __LABELS__;
+  const b = [...document.querySelectorAll('button')].find(e => e.getBoundingClientRect().width > 0 && L.includes((e.getAttribute('aria-label') || '').trim()));
+  return b ? (b.innerText || '').trim().split(/\s+/)[0] : null;
+})()"""
+
 _AUDIO_STATE = r"""/* AUDIO_STATE */ (() => {
   const L = __LABELS__;
   const b = [...document.querySelectorAll('button')].find(e => e.getBoundingClientRect().width > 0 && L.includes((e.getAttribute('aria-label') || '').trim()));
@@ -271,6 +277,11 @@ class GrokPage:
         await self._sleep(0.6)
         if await self.cdp.evaluate(_MENU_OPEN):
             await self._escape()
+        # клик мог не попасть: значение на кнопке перечитываем, иначе вышло бы видео с настройками по умолчанию
+        shown = await self.cdp.evaluate(_labels(_TRIGGER_TEXT, button_labels))
+        if shown != option:
+            raise DriverError(f"Grok не применил значение {option} в меню «{button_labels[0]}»: сейчас выбрано "
+                              f"{shown}. Генерация не запущена, чтобы не получить не то, что заказано.")
 
     async def set_audio(self, wanted: bool) -> None:
         state = await self.cdp.evaluate(_labels(_AUDIO_STATE, L_AUDIO))
@@ -284,6 +295,9 @@ class GrokPage:
                 raise await self._missing(f"переключатель «{L_AUDIO[0]}»")
             await self._real_click(*pos)
             await self._sleep(0.4)
+            if (await self.cdp.evaluate(_labels(_AUDIO_STATE, L_AUDIO)) == "true") != wanted:
+                raise DriverError(f"не удалось переключить «{L_AUDIO[0]}» на {'вкл' if wanted else 'выкл'}: "
+                                  "Grok оставил прежнее состояние. Генерация не запущена.")
 
     async def attach_image(self, path: Path) -> None:
         await self.cdp.send("Page.enable")

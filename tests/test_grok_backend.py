@@ -30,6 +30,9 @@ class FakePage:
         self.result = result or Generated(b"DATA", ".mp4")
         self.last_image_count = 0
 
+    async def reveal_window(self):
+        self.calls.append("reveal")
+
     async def open(self, url, *, post=False):
         self.calls.append(("open", url, post))
 
@@ -152,11 +155,10 @@ def test_video_generation_drives_the_page_in_order_and_reports_the_post_id(tmp_p
     rec = Rec()
     opts = VideoOptions("лодка", None, "480p", 6, None, None)
     got = asyncio.run(b.generate(opts, rec))
-    assert page.calls == [("open", IMAGINE_URL, False), "prepare_video", ("prompt", "лодка"), ("submit", "video"),
-                          ("wait", "video", POST), ("download", "SRC", "video")]
+    assert page.calls == ["reveal", ("open", IMAGINE_URL, False), "prepare_video", ("prompt", "лодка"),
+                          ("submit", "video"), ("wait", "video", POST), ("download", "SRC", "video")]
     assert rec.events == [("submitted", POST), ("phase", "downloading")]
     assert got == Generated(b"DATA", ".mp4") and conn.closed and len(ensured) == 1
-    assert "Page.bringToFront" in conn.sent
 
 
 def test_image_generation_has_no_post_id_and_notes_the_extra_images(tmp_path):
@@ -182,7 +184,7 @@ def test_resume_opens_the_post_page_and_skips_the_form(tmp_path):
     b, conn, _ = wired(tmp_path, page)
     rec = Rec()
     asyncio.run(b.resume(POST, "video", rec))
-    assert page.calls == [("open", POST_URL.format(post_id=POST), True), ("wait", "video", POST),
+    assert page.calls == ["reveal", ("open", POST_URL.format(post_id=POST), True), ("wait", "video", POST),
                           ("download", "SRC", "video")]
     assert rec.events == [("phase", "downloading")] and conn.closed
 

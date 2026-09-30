@@ -123,7 +123,10 @@ _THUMB = r"""/* THUMB */ !!document.querySelector('img[src^="blob:"]')"""
 _FOCUS = r"""/* FOCUS */ (() => { const t = document.querySelector('[role=textbox]'); if (!t) return false; t.focus(); return true; })()"""
 _SUBMIT_READY = r"""/* SUBMIT_READY */ (() => { const b = document.querySelector('button[type=submit]'); return !!b && !b.disabled && b.getBoundingClientRect().width > 0; })()"""
 _SUBMIT_CLICK = r"""/* SUBMIT_CLICK */ (() => { const b = document.querySelector('button[type=submit]'); if (!b || b.disabled) return false; b.click(); return true; })()"""
-_LABELS = r"""/* LABELS */ JSON.stringify([...document.querySelectorAll('button,[role=radio]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.x >= 260; }).map(e => (e.getAttribute('aria-label') || '').trim()).filter(Boolean))"""
+_LABELS = r"""/* LABELS */ JSON.stringify({
+  labels: [...document.querySelectorAll('button,[role=radio]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.x >= 260; }).map(e => (e.getAttribute('aria-label') || '').trim()).filter(Boolean),
+  hidden: document.visibilityState === 'hidden'
+})"""
 
 _FETCH = r"""/* FETCH */ (async (u) => {
   try {
@@ -168,12 +171,28 @@ class GrokPage:
 
     async def _missing(self, what: str) -> DriverError:
         try:
-            found = json.loads(await self.cdp.evaluate(_LABELS))
-        except (CdpError, ValueError, TypeError):
-            found = []
+            seen = json.loads(await self.cdp.evaluate(_LABELS))
+            found, hidden = seen["labels"], seen["hidden"]
+        except (CdpError, ValueError, TypeError, KeyError):
+            found, hidden = [], False
+        if hidden:          # в скрытом окне Chrome не рисует кадры, и меню не появляются: вина окна, а не вёрстки
+            return DriverError(f"окно Chrome скрыто (закрыто другими окнами или свёрнуто), поэтому Grok не показал "
+                               f"«{what}». Разверните окно Chrome (профиль {self.profile}) или закройте его: "
+                               "сервер запустит новое, которое работает и под другими окнами.")
         shown = ", ".join(found[:30]) or "ничего не найдено"
         return DriverError(f"интерфейс Grok изменился или не успел загрузиться: не найден элемент «{what}». "
                            f"Подписи на странице: {shown}")
+
+    async def reveal_window(self) -> None:
+        """Свёрнутое окно Chrome не рисует страницу: разворачиваем его и выводим вперёд (развёрнутое не трогаем)."""
+        try:
+            info = await self.cdp.send("Browser.getWindowForTarget")
+            if (info.get("bounds") or {}).get("windowState") == "minimized":
+                await self.cdp.send("Browser.setWindowBounds", windowId=info["windowId"],
+                                    bounds={"windowState": "normal"})
+        except CdpError:
+            pass                                   # старый Chrome без этого API: не критично
+        await self.cdp.send("Page.bringToFront")
 
     async def _wait_for(self, js: str, timeout_s: float, what: str):
         deadline = self._now() + timeout_s

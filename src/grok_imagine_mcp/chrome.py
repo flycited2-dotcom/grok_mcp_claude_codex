@@ -14,7 +14,14 @@ from .drivers import DriverError
 GROK_URL = "https://grok.com/imagine"
 
 
-def find_chrome(env: Mapping[str, str]) -> Path | None:
+# клиент MCP может запустить сервер с урезанным окружением (без ProgramFiles), а Chrome стоит там, где всегда
+_DEFAULT_CHROME_PATHS = (
+    Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+    Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+)
+
+
+def find_chrome(env: Mapping[str, str], *, fallbacks=_DEFAULT_CHROME_PATHS) -> Path | None:
     explicit = env.get("GROK_CHROME_PATH")
     if explicit:                                     # явно указанный путь не заменяем догадкой
         path = Path(explicit)
@@ -25,16 +32,17 @@ def find_chrome(env: Mapping[str, str]) -> Path | None:
             candidate = Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe"
             if candidate.is_file():
                 return candidate
-    return None
+    return next((c for c in fallbacks if c.is_file()), None)
 
 
 def build_command(chrome: Path, port: int, profile: Path, url: str = GROK_URL) -> list[str]:
     return [
         str(chrome), f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
-        # свёрнутое или перекрытое окно не должно замедлять страницу: генерации идут без присмотра
+        # перекрытое другим окном окно Windows считает скрытым, и Grok перестаёт рисовать в нём меню:
+        # генерации идут без присмотра, поэтому окно должно работать и под другими окнами
         "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
-        "--disable-background-timer-throttling", f"--app={url}",
+        "--disable-background-timer-throttling", "--disable-features=CalculateNativeWinOcclusion", f"--app={url}",
     ]
 
 

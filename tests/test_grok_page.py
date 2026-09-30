@@ -25,7 +25,7 @@ class FakeCdp:
 
     def __init__(self, script=None):
         self.script = {k: (list(v) if isinstance(v, list) else [v]) for k, v in (script or {}).items()}
-        self.sent, self.events, self.evaluated = [], {}, []
+        self.sent, self.events, self.evaluated, self.responses = [], {}, [], {}
 
     async def evaluate(self, js):
         self.evaluated.append(js)
@@ -36,7 +36,10 @@ class FakeCdp:
 
     async def send(self, method, **params):
         self.sent.append((method, params))
-        return {}
+        reply = self.responses.get(method, {})
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
     async def wait_event(self, name, timeout=5.0):
         return self.events.get(name)
@@ -99,10 +102,44 @@ def test_open_reports_a_blocking_dialog_but_ignores_cookie_banner():
 # ---------- элементы интерфейса ----------
 
 def test_missing_mode_switch_lists_the_labels_that_are_on_the_page():
-    p, _, _ = page({"/* CLICK_RADIO */": False, "/* LABELS */": json.dumps(["Звук видео", "Загрузить"])})
+    p, _, _ = page({"/* CLICK_RADIO */": False,
+                    "/* LABELS */": json.dumps({"labels": ["Звук видео", "Загрузить"], "hidden": False})})
     with pytest.raises(DriverError) as e:
         run(p.select_mode("video"))
     assert "интерфейс Grok изменился" in str(e.value) and "Звук видео" in str(e.value)
+
+
+def test_missing_element_in_a_hidden_window_blames_the_window_not_the_interface():
+    p, _, _ = page({"/* CLICK_RADIO */": False,
+                    "/* LABELS */": json.dumps({"labels": ["Звук видео"], "hidden": True})})
+    with pytest.raises(DriverError) as e:
+        run(p.select_mode("video"))
+    msg = str(e.value)
+    assert "окно Chrome скрыто" in msg and "PROF" in msg and "интерфейс Grok изменился" not in msg
+
+
+def test_reveal_window_restores_a_minimized_window_and_brings_it_to_front():
+    p, cdp, _ = page()
+    cdp.responses["Browser.getWindowForTarget"] = {"windowId": 7, "bounds": {"windowState": "minimized"}}
+    run(p.reveal_window())
+    assert ("Browser.setWindowBounds", {"windowId": 7, "bounds": {"windowState": "normal"}}) in cdp.sent
+    assert cdp.sent[-1] == ("Page.bringToFront", {})
+
+
+def test_reveal_window_leaves_a_maximized_window_alone():
+    p, cdp, _ = page()
+    cdp.responses["Browser.getWindowForTarget"] = {"windowId": 7, "bounds": {"windowState": "maximized"}}
+    run(p.reveal_window())
+    assert not [m for m, _ in cdp.sent if m == "Browser.setWindowBounds"]
+    assert cdp.sent[-1] == ("Page.bringToFront", {})
+
+
+def test_reveal_window_survives_a_chrome_without_the_window_api():
+    from grok_imagine_mcp.cdp import CdpError
+    p, cdp, _ = page()
+    cdp.responses["Browser.getWindowForTarget"] = CdpError("'Browser.getWindowForTarget' wasn't found")
+    run(p.reveal_window())
+    assert cdp.sent[-1] == ("Page.bringToFront", {})
 
 
 def _item(text, disabled=False):

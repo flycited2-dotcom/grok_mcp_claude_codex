@@ -29,7 +29,14 @@ def test_find_chrome_looks_in_standard_places(tmp_path):
 
 
 def test_find_chrome_none_when_not_installed(tmp_path):
-    assert find_chrome({"ProgramFiles": str(tmp_path)}) is None
+    assert find_chrome({"ProgramFiles": str(tmp_path)}, fallbacks=()) is None
+
+
+def test_find_chrome_falls_back_to_default_install_dirs_when_the_env_is_stripped(tmp_path):
+    """Клиент MCP может запустить сервер без ProgramFiles в окружении: Chrome всё равно установлен там, где всегда."""
+    installed = _exe(tmp_path, "pf", "Google", "Chrome", "Application", "chrome.exe")
+    assert find_chrome({}, fallbacks=(tmp_path / "нет" / "chrome.exe", installed)) == installed
+    assert find_chrome({}, fallbacks=(tmp_path / "нет" / "chrome.exe",)) is None
 
 
 def test_command_has_port_profile_app_window_and_no_headless(tmp_path):
@@ -40,6 +47,8 @@ def test_command_has_port_profile_app_window_and_no_headless(tmp_path):
     assert f"--user-data-dir={tmp_path / 'prof'}" in cmd
     assert "--app=https://grok.com/imagine" in cmd
     assert "--disable-background-timer-throttling" in cmd
+    # без этого окно, закрытое другим окном, считается скрытым и Grok не рисует в нём меню
+    assert "--disable-features=CalculateNativeWinOcclusion" in cmd
     assert not any("headless" in a for a in cmd)
 
 

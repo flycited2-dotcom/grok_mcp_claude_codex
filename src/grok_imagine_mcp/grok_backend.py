@@ -57,8 +57,9 @@ class GrokBackend:
             raise DriverError(f"в окне Chrome (порт {self.port}) нет вкладки, которой можно управлять")
         cdp = await self._connect(ws_url)
         try:
-            await cdp.send("Page.bringToFront")
-            yield self._make_page(cdp, profile=str(self.profile))
+            page = self._make_page(cdp, profile=str(self.profile))
+            await page.reveal_window()
+            yield page
         finally:
             await cdp.close()
 

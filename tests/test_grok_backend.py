@@ -205,7 +205,7 @@ def test_video_generation_drives_the_page_in_order_and_reports_the_post_id(tmp_p
     page = FakePage()
     b, conn, ensured = wired(tmp_path, page)
     rec = Rec()
-    opts = VideoOptions("лодка", None, "480p", 6, None, None)
+    opts = VideoOptions("лодка", (), "480p", 6, None, None)
     got = asyncio.run(b.generate(opts, rec))
     assert page.calls == ["reveal", ("open", IMAGINE_URL, False), "prepare_video", ("prompt", "лодка"),
                           ("submit", "video"), ("wait", "video", POST), ("download", "SRC", "video")]
@@ -245,5 +245,5 @@ def test_connection_is_closed_even_when_the_page_fails(tmp_path):
     page = FakePage(fail=DriverError("файл повреждён"))
     b, conn, _ = wired(tmp_path, page)
     with pytest.raises(DriverError, match="повреждён"):
-        asyncio.run(b.generate(VideoOptions("x", None, None, None, None, None), Rec()))
+        asyncio.run(b.generate(VideoOptions("x", (), None, None, None, None), Rec()))
     assert conn.closed is True

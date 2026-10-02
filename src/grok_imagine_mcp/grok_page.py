@@ -125,7 +125,9 @@ _PANEL_UPLOAD = r"""/* PANEL_UPLOAD */ (() => {
   return JSON.stringify({x: r.x + r.width / 2, y: r.y + r.height / 2});
 })()"""
 
-_THUMB = r"""/* THUMB */ !!document.querySelector('img[src^="blob:"]')"""
+_ATTACHED = r"""/* ATTACHED */ [...document.querySelectorAll('button')].filter(e => e.getBoundingClientRect().width > 0 && /remove image|удалить изображение/i.test(e.getAttribute('aria-label') || '')).length"""
+_MENTIONS = r"""/* MENTIONS */ (() => { const b = document.querySelector('[role=textbox]'); return b ? b.querySelectorAll('[data-mention-type]').length : 0; })()"""
+_MENTION_REACHED = r"""/* MENTION_REACHED */ (() => { const b = document.querySelector('[role=textbox]'); return !!b && b.querySelectorAll('[data-mention-type]').length >= __N__; })()"""
 _FOCUS = r"""/* FOCUS */ (() => { const t = document.querySelector('[role=textbox]'); if (!t) return false; t.focus(); return true; })()"""
 _SUBMIT_READY = r"""/* SUBMIT_READY */ (() => { const b = document.querySelector('button[type=submit]'); return !!b && !b.disabled && b.getBoundingClientRect().width > 0; })()"""
 _SUBMIT_CLICK = r"""/* SUBMIT_CLICK */ (() => { const b = document.querySelector('button[type=submit]'); if (!b || b.disabled) return false; b.click(); return true; })()"""
@@ -299,7 +301,9 @@ class GrokPage:
                 raise DriverError(f"не удалось переключить «{L_AUDIO[0]}» на {'вкл' if wanted else 'выкл'}: "
                                   "Grok оставил прежнее состояние. Генерация не запущена.")
 
-    async def attach_image(self, path: Path) -> None:
+    async def attach_images(self, paths: list[Path]) -> None:
+        """Все файлы идут одним выбором: Grok принимает пакет (проверено: 12 за раз). Одна картинка - первый кадр,
+        две и больше - референсы."""
         await self.cdp.send("Page.enable")
         await self.cdp.send("Page.setInterceptFileChooserDialog", enabled=True)   # системное окно не должно появиться
         try:
@@ -314,18 +318,30 @@ class GrokPage:
             event = await self.cdp.wait_event("Page.fileChooserOpened", 6.0)
             if event is None:
                 raise DriverError("Grok не открыл выбор файла: не удалось приложить фото")
-            await self.cdp.send("DOM.setFileInputFiles", files=[str(path)], backendNodeId=event["backendNodeId"])
-            await self._wait_for(_THUMB, 25.0, "миниатюра приложенного фото")
+            await self.cdp.send("DOM.setFileInputFiles", files=[str(p) for p in paths],
+                                backendNodeId=event["backendNodeId"])
+            await self._wait_attached(len(paths))
         finally:
             try:
                 await self.cdp.send("Page.setInterceptFileChooserDialog", enabled=False)
             except CdpError:
                 pass
 
+    async def _wait_attached(self, n: int) -> None:
+        deadline = self._now() + 25.0 + 2.0 * n
+        while True:
+            have = await self.cdp.evaluate(_ATTACHED)
+            if have == n:
+                return
+            if self._now() >= deadline:
+                raise DriverError(f"приложились не все картинки: {have} из {n}. Повторите запрос; если повторяется, "
+                                  "уменьшите число или размер картинок.")
+            await self._sleep(0.5)
+
     async def prepare_video(self, opts: VideoOptions) -> None:
         await self.select_mode("video")
-        if opts.image_path is not None:
-            await self.attach_image(opts.image_path)
+        if opts.image_paths:
+            await self.attach_images(list(opts.image_paths))
         if opts.resolution:
             await self.choose_menu_option(L_RESOLUTION, opts.resolution)
         if opts.duration_s:
@@ -345,8 +361,34 @@ class GrokPage:
     async def enter_prompt(self, text: str) -> None:
         if not await self.cdp.evaluate(_FOCUS):
             raise await self._missing("поле ввода промта")
-        await self.cdp.send("Input.insertText", text=" ".join(text.split()))   # перенос строки мог бы отправить форму
+        # переносы строк схлопываем: перенос мог бы отправить форму раньше времени
+        parts = [p for p in re.split(r"(@Image \d+)", re.sub(r"\s+", " ", text).strip()) if p]
+        have = None
+        for part in parts:
+            if re.fullmatch(r"@Image \d+", part):
+                if have is None:
+                    have = await self.cdp.evaluate(_MENTIONS)
+                await self._insert_mention(part[1:], have + 1)
+                have += 1
+            else:
+                await self.cdp.send("Input.insertText", text=part)
         await self._wait_for(_SUBMIT_READY, 6.0, "кнопка отправки")
+
+    async def _insert_mention(self, label: str, want: int) -> None:
+        """Ссылка на картинку становится ссылкой, только если выбрать её из списка после «@» (проверено живьём:
+        набранное текстом «@Image 2» остаётся обычным текстом)."""
+        await self.cdp.send("Input.insertText", text="@")
+        await self._sleep(0.5)
+        await self.cdp.send("Input.insertText", text=label)             # список сужается до этой картинки
+        await self._sleep(0.5)
+        for kind in ("keyDown", "keyUp"):
+            await self.cdp.send("Input.dispatchKeyEvent", type=kind, key="Enter", code="Enter", windowsVirtualKeyCode=13)
+        deadline = self._now() + 3.0
+        while not await self.cdp.evaluate(_MENTION_REACHED.replace("__N__", str(want))):
+            if self._now() >= deadline:
+                raise DriverError(f"не удалось вставить ссылку @{label}: Grok не добавил её в промт. "
+                                  "Проверьте, что картинка с таким номером приложена.")
+            await self._sleep(0.3)
 
     async def submit(self, kind: str = "video") -> str | None:
         """Видео: возвращает post_id со страницы результата. Картинка: страницы поста нет, возвращает None,

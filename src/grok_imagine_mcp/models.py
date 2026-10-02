@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 # Допустимые значения — из xai-sdk 1.20.0 (types/model.py, types/video.py, types/image.py).
 VideoModel = Literal["grok-imagine-video", "grok-imagine-video-1.5"]
@@ -19,6 +19,8 @@ MAX_PROMPT_CHARS = 4000          # страховочный предел, не �
 MAX_DURATION_S = 15              # xai-sdk: «Duration of the video to generate in seconds (1-15)»
 # Фото уходит base64 (×4/3), а канал xai-sdk режет сообщения на 20 МиБ, поэтому 10 МиБ с запасом.
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# Осторожный предел числа картинок: у xAI до 7 референсов; интерфейс Grok принимал и больше, но за 7 не проверено.
+MAX_IMAGES = 7
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
@@ -69,6 +71,7 @@ class _PromptRequest(BaseModel):
 class VideoRequest(_PromptRequest):
     model: VideoModel = "grok-imagine-video"
     image_path: Path | None = None
+    image_paths: list[Path] | None = None          # 1 — первый кадр, 2 и больше — референсы (только драйвер web)
     duration_s: int | None = None
     aspect_ratio: VideoAspect | None = None
     resolution: VideoResolution | None = None
@@ -78,6 +81,27 @@ class VideoRequest(_PromptRequest):
     @classmethod
     def _image(cls, v: Path | None) -> Path | None:
         return None if v is None else _check_image(v)
+
+    @field_validator("image_paths")
+    @classmethod
+    def _images(cls, v: list[Path] | None) -> list[Path] | None:
+        if not v:
+            return None
+        if len(v) > MAX_IMAGES:
+            raise ValueError(f"картинок не больше {MAX_IMAGES}, получено {len(v)}")
+        checked = []
+        for i, path in enumerate(v):
+            try:
+                checked.append(_check_image(path))
+            except ValueError as e:
+                raise ValueError(f"image_paths[{i}]: {e}") from None
+        return checked
+
+    @model_validator(mode="after")
+    def _one_way_to_attach(self) -> "VideoRequest":
+        if self.image_path is not None and self.image_paths:
+            raise ValueError("укажите одно из двух: image_path или image_paths")
+        return self
 
     @field_validator("duration_s")
     @classmethod

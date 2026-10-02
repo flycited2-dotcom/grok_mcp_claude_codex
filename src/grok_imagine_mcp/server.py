@@ -43,6 +43,12 @@ def build_server(driver: Driver) -> MCPServer:
         image_path: Annotated[str | None, Field(description=(
             "Абсолютный путь к локальному PNG/JPG/WEBP до 10 МБ — первый кадр для режима «фото → видео». "
             "Без него — «текст → видео»."))] = None,
+        image_paths: Annotated[list[str] | None, Field(description=(
+            "Абсолютные пути к 1–7 локальным PNG/JPG/WEBP (каждая до 10 МБ). Одна картинка — первый кадр "
+            "(«фото → видео»). Две и больше — референсы: Grok сохраняет по ним героев и предметы (только драйвер web). "
+            "Ссылаться на них в промте можно как @Image 1, @Image 2 (по порядку в списке). С несколькими картинками "
+            "доступны 480p и 720p, а формат кадра задаётся; с одной картинкой формат берётся из неё. "
+            "Нельзя вместе с image_path."))] = None,
         duration_s: Annotated[int | None, Field(description="Длительность, секунды, от 1 до 15 (по умолчанию решает API)")] = None,
         aspect_ratio: Annotated[VideoAspect | None, Field(description="Формат кадра")] = None,
         resolution: Annotated[VideoResolution | None, Field(description=(
@@ -52,7 +58,7 @@ def build_server(driver: Driver) -> MCPServer:
     ) -> TaskInfo:
         """Поставить задачу генерации видео. Возвращает task_id сразу; готовое видео забирать через grok_task_status."""
         try:
-            req = VideoRequest(prompt=prompt, image_path=image_path, duration_s=duration_s,
+            req = VideoRequest(prompt=prompt, image_path=image_path, image_paths=image_paths, duration_s=duration_s,
                                aspect_ratio=aspect_ratio, resolution=resolution,
                                generate_audio=generate_audio, model=model)
         except ValidationError as e:

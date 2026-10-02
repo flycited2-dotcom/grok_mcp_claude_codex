@@ -427,3 +427,13 @@ def test_record_from_dry_run_is_returned_as_is_not_polled(tmp_path):
     info = run(drv.task_status("aaaaaaaaaaaa", 5))
     assert info.status == "recorded_dry_run" and info.submitted is False
     assert c.video.get_calls == []
+
+
+def test_several_images_are_refused_by_the_xai_driver_instead_of_being_silently_dropped(tmp_path):
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    a.write_bytes(PNG)
+    b.write_bytes(PNG)
+    drv, client = make(tmp_path)
+    with pytest.raises(DriverError, match="драйвер web"):
+        run(drv.submit_video(VideoRequest(prompt="x", image_paths=[str(a), str(b)])))
+    assert client.video.start_calls == []

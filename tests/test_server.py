@@ -181,3 +181,26 @@ def test_stdio_web_driver_reports_status_without_launching_chrome(tmp_path):
     data = _payload(anyio.run(main))
     assert data["driver"] == "web" and data["live"] is True and data["ready"] is True
     assert "не запущено" in data["detail"]
+
+
+def test_video_tool_offers_several_images_and_explains_how_to_mention_them(tmp_path):
+    async def fn(c):
+        return {t.name: t for t in (await c.list_tools()).tools}
+    tool = _with_client(tmp_path, fn)["grok_generate_video"]
+    assert "image_paths" in tool.input_schema["properties"]
+    text = json.dumps(tool.input_schema, ensure_ascii=False)
+    assert "@Image 1" in text and "референс" in text.lower()
+
+
+def test_generate_video_with_several_photos_roundtrip(tmp_path):
+    a, b = tmp_path / "a.png", tmp_path / "b.png"
+    a.write_bytes(PNG)
+    b.write_bytes(PNG)
+
+    async def fn(c):
+        return await c.call_tool("grok_generate_video",
+                                 {"prompt": "@Image 1 и @Image 2 танцуют", "image_paths": [str(a), str(b)]})
+    res = _with_client(tmp_path, fn)
+    assert res.is_error is False
+    saved = json.loads((_tasks_dir(tmp_path) / f"{_payload(res)['task_id']}.json").read_text(encoding="utf-8"))
+    assert saved["request"]["image_paths"] == [str(a), str(b)]

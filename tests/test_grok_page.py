@@ -214,25 +214,69 @@ def test_audio_toggle_that_did_not_flip_is_an_error():
         run(p.set_audio(False))
 
 
-def test_attach_image_uses_the_intercepted_file_chooser(tmp_path):
-    img = tmp_path / "a.png"
-    img.write_bytes(PNG)
+def test_attach_images_puts_all_files_through_one_intercepted_file_chooser(tmp_path):
+    imgs = []
+    for name in ("a.png", "b.png", "c.png"):
+        f = tmp_path / name
+        f.write_bytes(PNG)
+        imgs.append(f)
     p, cdp, _ = page({"/* RECT */": json.dumps({"x": 1, "y": 2}), "/* PANEL_UPLOAD */": json.dumps({"x": 3, "y": 4}),
-                      "/* THUMB */": True})
+                      "/* ATTACHED */": [1, 2, 3]})                    # вложения появляются по мере загрузки
     cdp.events["Page.fileChooserOpened"] = {"backendNodeId": 42, "mode": "selectMultiple"}
-    run(p.attach_image(img))
-    assert ("DOM.setFileInputFiles", {"files": [str(img)], "backendNodeId": 42}) in cdp.sent
+    run(p.attach_images(imgs))
+    assert ("DOM.setFileInputFiles", {"files": [str(f) for f in imgs], "backendNodeId": 42}) in cdp.sent
     assert ("Page.setInterceptFileChooserDialog", {"enabled": True}) in cdp.sent
     assert cdp.sent[-1] == ("Page.setInterceptFileChooserDialog", {"enabled": False})
 
 
-def test_attach_image_fails_clearly_when_no_chooser_opens(tmp_path):
+def test_attach_images_fails_clearly_when_no_chooser_opens(tmp_path):
     img = tmp_path / "a.png"
     img.write_bytes(PNG)
     p, cdp, _ = page({"/* RECT */": json.dumps({"x": 1, "y": 2}), "/* PANEL_UPLOAD */": json.dumps({"x": 3, "y": 4})})
     with pytest.raises(DriverError, match="выбор файла"):
-        run(p.attach_image(img))
+        run(p.attach_images([img]))
     assert cdp.sent[-1] == ("Page.setInterceptFileChooserDialog", {"enabled": False})
+
+
+def test_attach_images_reports_how_many_actually_attached_when_some_are_missing(tmp_path):
+    imgs = []
+    for name in ("a.png", "b.png", "c.png"):
+        f = tmp_path / name
+        f.write_bytes(PNG)
+        imgs.append(f)
+    p, cdp, _ = page({"/* RECT */": json.dumps({"x": 1, "y": 2}), "/* PANEL_UPLOAD */": json.dumps({"x": 3, "y": 4}),
+                      "/* ATTACHED */": 1})                              # приложилась одна из трёх
+    cdp.events["Page.fileChooserOpened"] = {"backendNodeId": 42, "mode": "selectMultiple"}
+    with pytest.raises(DriverError, match="приложились не все картинки.*1 из 3"):
+        run(p.attach_images(imgs))
+    assert cdp.sent[-1] == ("Page.setInterceptFileChooserDialog", {"enabled": False})
+
+
+# ---------- ссылки @Image N в промте ----------
+
+def test_a_mention_in_the_prompt_is_inserted_as_a_real_chip_picked_from_the_list():
+    """Проверено живьём: набранный текстом «@Image 2» ссылкой не становится; чип появляется, только если после «@»
+    выбрать картинку из списка (Enter)."""
+    p, cdp, _ = page({"/* FOCUS */": True, "/* SUBMIT_READY */": True, "/* MENTIONS */": 0,
+                      "/* MENTION_REACHED */": True})
+    run(p.enter_prompt("Герой @Image 1 танцует\nс @Image 2 вместе"))
+    typed = [params["text"] for m, params in cdp.sent if m == "Input.insertText"]
+    assert typed == ["Герой ", "@", "Image 1", " танцует с ", "@", "Image 2", " вместе"]
+    enters = [params for m, params in cdp.sent if m == "Input.dispatchKeyEvent" and params["key"] == "Enter"]
+    assert len(enters) == 4                                                  # два нажатия: keyDown + keyUp
+
+
+def test_a_mention_that_does_not_turn_into_a_chip_is_an_error():
+    p, _, _ = page({"/* FOCUS */": True, "/* SUBMIT_READY */": True, "/* MENTIONS */": 0,
+                    "/* MENTION_REACHED */": False})
+    with pytest.raises(DriverError, match="не удалось вставить ссылку @Image 3"):
+        run(p.enter_prompt("Танцует @Image 3"))
+
+
+def test_a_prompt_without_mentions_does_not_ask_the_page_about_chips():
+    p, cdp, _ = page({"/* FOCUS */": True, "/* SUBMIT_READY */": True})      # MENTIONS в сценарии нет: вызов упал бы
+    run(p.enter_prompt("просто текст"))
+    assert ("Input.insertText", {"text": "просто текст"}) in cdp.sent
 
 
 # ---------- ожидание результата ----------
@@ -363,5 +407,5 @@ def test_asset_url_must_be_https_on_grok_com_and_nothing_is_fetched_otherwise():
 
 def test_prepare_video_applies_only_the_options_that_were_given():
     p, cdp, _ = page({"/* CLICK_RADIO */": True, "/* RADIO_CHECKED */": True})
-    run(p.prepare_video(VideoOptions("x", None, None, None, None, None)))
+    run(p.prepare_video(VideoOptions("x", (), None, None, None, None)))
     assert not [1 for m, _ in cdp.sent if m == "Input.dispatchMouseEvent"]       # ни одного меню не открывали

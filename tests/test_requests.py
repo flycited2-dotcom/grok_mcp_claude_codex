@@ -131,3 +131,39 @@ def test_image_too_large_rejected(tmp_path, monkeypatch):
 def test_image_limit_leaves_room_for_base64_inside_20mib_channel():
     # base64 раздувает данные в 4/3, а канал xai-sdk режет сообщения на 20 МиБ
     assert models.MAX_IMAGE_BYTES * 4 / 3 < 20 * 1024 * 1024
+
+
+# ---------- несколько картинок (первый кадр или референсы) ----------
+
+def _many(tmp_path, n):
+    return [_img(tmp_path, f"r{i}.png", PNG) for i in range(n)]
+
+
+def test_several_images_are_validated_one_by_one(tmp_path):
+    a, b = _img(tmp_path, "a.png", PNG), _img(tmp_path, "b.jpg", JPG)
+    v = VideoRequest(prompt="x", image_paths=[str(a), str(b)])
+    assert v.image_paths == [a, b] and v.image_path is None
+
+
+def test_empty_image_list_means_no_images():
+    assert VideoRequest(prompt="x", image_paths=[]).image_paths is None
+
+
+def test_image_path_and_image_paths_are_mutually_exclusive(tmp_path):
+    a, b = _many(tmp_path, 2)
+    with pytest.raises(ValidationError, match="одно из двух"):
+        VideoRequest(prompt="x", image_path=str(a), image_paths=[str(b)])
+
+
+def test_a_bad_file_in_the_list_is_named_by_position(tmp_path):
+    good = _img(tmp_path, "ok.png", PNG)
+    fake = _img(tmp_path, "fake.png", b"not an image at all")
+    with pytest.raises(ValidationError, match=r"image_paths\[1\]"):
+        VideoRequest(prompt="x", image_paths=[str(good), str(fake)])
+
+
+def test_too_many_images_rejected(tmp_path):
+    assert models.MAX_IMAGES == 7
+    assert len(VideoRequest(prompt="x", image_paths=[str(p) for p in _many(tmp_path, 7)]).image_paths) == 7
+    with pytest.raises(ValidationError, match="не больше 7"):
+        VideoRequest(prompt="x", image_paths=[str(p) for p in _many(tmp_path, 8)])

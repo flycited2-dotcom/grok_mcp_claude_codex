@@ -87,6 +87,9 @@ class XaiDriver:
                 "created_at": now_iso(), "request": req.model_dump(mode="json", exclude_none=True), **extra}
 
     async def submit_video(self, req: VideoRequest) -> TaskInfo:
+        if req.image_paths:                 # молча отбросить картинки нельзя: результат был бы не тем, что заказано
+            raise DriverError("несколько картинок (референсы) сейчас поддерживает только драйвер web: "
+                              "задайте GROK_DRIVER=web. Драйвер xai принимает одну картинку (image_path).")
         kw = {k: v for k, v in {"duration": req.duration_s, "aspect_ratio": req.aspect_ratio,
                                 "resolution": req.resolution, "generate_audio": req.generate_audio}.items()
               if v is not None}

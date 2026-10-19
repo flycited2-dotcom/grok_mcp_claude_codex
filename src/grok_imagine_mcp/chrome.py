@@ -68,7 +68,8 @@ def _listener_command_line(port: int) -> str | None:
               "$c.OwningProcess)).CommandLine }")
     try:
         done = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                              creationflags=subprocess.CREATE_NO_WINDOW)      # без мигающего окна консоли
     except (OSError, subprocess.TimeoutExpired):
         return None
     return done.stdout.strip() or None

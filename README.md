@@ -198,14 +198,7 @@ GROK_DRIVER=web
 
 ## Автозапуск окна после входа в Windows
 
-Чтобы окно Chrome для Grok открывалось само, но не мешало загрузке системы, оно запускается задачей планировщика
-`GrokMcpChromeAutostart`: при входе пользователя, с задержкой 5 минут (модуль `python -m grok_imagine_mcp.launch_window`,
-использует порт и профиль из `~/.grok_imagine_mcp/.env`; если окно уже открыто, ничего не делает). Создание (PowerShell):
-
-```powershell
-$a = New-ScheduledTaskAction -Execute "<папка>\.venv\Scripts\pythonw.exe" -Argument '-m grok_imagine_mcp.launch_window' -WorkingDirectory "<папка>"
-$t = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"; $t.Delay = 'PT5M'
-Register-ScheduledTask -TaskName GrokMcpChromeAutostart -Action $a -Trigger $t -Force
-```
-
-Задержку меняет поле `Delay` (`PT5M` = 5 минут). Отключить: `Disable-ScheduledTask GrokMcpChromeAutostart`, удалить: `Unregister-ScheduledTask GrokMcpChromeAutostart`.
+Отдельной задачи для этого не создаётся: окно открывает сервер при первой генерации. Если нужно открывать его заранее,
+после входа в Windows с задержкой, поменяйте `Delay` триггера уже существующей задачи планировщика (у владельца это
+`GrokChromePersonalBridge-MCP_Grok_claude_codex`, сейчас `PT5M` = 5 минут). Модуль `python -m grok_imagine_mcp.launch_window`
+открывает окно с профилем и портом из `~/.grok_imagine_mcp/.env`, если оно ещё не открыто.

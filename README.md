@@ -195,3 +195,17 @@ GROK_DRIVER=web
 .\.venv\Scripts\pip install -e ".[dev]"
 .\.venv\Scripts\pytest
 ```
+
+## Автозапуск окна после входа в Windows
+
+Чтобы окно Chrome для Grok открывалось само, но не мешало загрузке системы, оно запускается задачей планировщика
+`GrokMcpChromeAutostart`: при входе пользователя, с задержкой 5 минут (модуль `python -m grok_imagine_mcp.launch_window`,
+использует порт и профиль из `~/.grok_imagine_mcp/.env`; если окно уже открыто, ничего не делает). Создание (PowerShell):
+
+```powershell
+$a = New-ScheduledTaskAction -Execute "<папка>\.venv\Scripts\pythonw.exe" -Argument '-m grok_imagine_mcp.launch_window' -WorkingDirectory "<папка>"
+$t = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"; $t.Delay = 'PT5M'
+Register-ScheduledTask -TaskName GrokMcpChromeAutostart -Action $a -Trigger $t -Force
+```
+
+Задержку меняет поле `Delay` (`PT5M` = 5 минут). Отключить: `Disable-ScheduledTask GrokMcpChromeAutostart`, удалить: `Unregister-ScheduledTask GrokMcpChromeAutostart`.
